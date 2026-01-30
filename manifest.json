@@ -1,0 +1,48 @@
+{
+  "name": "PIMfox for Entra",
+  "version": "1.0.0",
+  "description": "Quickly (de)activate PIM roles for Entra & Azure.",
+  "manifest_version": 2,
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "pimfox@eightwone.com",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  },
+  "permissions": [
+    "storage",
+    "webRequest",
+    "webRequestBlocking",
+    "activeTab",
+    "https://graph.microsoft.com/*",
+    "https://management.azure.com/*",
+    "https://*.microsoft.com/*",
+    "https://*.microsoftonline.com/*",
+    "https://*.windows.net/*"
+  ],
+  "icons": {
+    "16": "assets/PIMfox16.png",
+    "32": "assets/PIMfox32.png",
+    "48": "assets/PIMfox48.png",
+    "96": "assets/PIMfox96.png",
+    "128": "assets/PIMfox128.png"
+  },
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_title": "PIMfox for Entra",
+    "browser_style": false,
+    "default_icon": {
+      "16": "assets/PIMfox16.png",
+      "32": "assets/PIMfox32.png",
+      "48": "assets/PIMfox48.png",
+      "96": "assets/PIMfox96.png",
+      "128": "assets/PIMfox128.png"
+    }
+  },
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": true
+  }
+}
