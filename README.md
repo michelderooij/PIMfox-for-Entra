@@ -7,7 +7,7 @@ A Firefox extension that allows you to activate multiple PIM (Privileged Identit
 PIMfox for Entra streamlines the activation of multiple PIM roles across Microsoft Entra and Azure subscriptions. Instead of activating roles individually through each role's portal, this extension lets you select and activate multiple roles at once, saving time and reducing administrative overhead.
 
 <p align="left">
-  [assets/screenshot.png](<img src="assets/screenshot_preview.png" alt="PIMfox for Entra" width="600">)
+  [https://assets/screenshot.png](<img src="assets/screenshot_preview.png" alt="PIMfox for Entra" width="600">)
 </p>
 
 It works by catching bearer tokens from requests to Microsoft Graph or Azure Management APIs. It then stores those tokens within your browser's local storage and uses them to obtain and activate your selected PIM roles.
@@ -17,7 +17,7 @@ It works by catching bearer tokens from requests to Microsoft Graph or Azure Man
 - Activate multiple PIM roles simultaneously (Entra ID and Azure resources)
 - Customizable activation duration
 - Simple and intuitive user interface
-- Secure authentication using existing browser bearer token
+- Secure authentication using the existing browser bearer token
 - Notification system for role activation status
 - Search and filter roles
 - Active roles monitoring with countdown timers
