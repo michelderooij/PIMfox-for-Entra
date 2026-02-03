@@ -83,4 +83,4 @@ If you encounter any issues or have questions, please open an issue on GitHub.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the <a href="LICENSE.MD">LICENSE</a> file for details.
