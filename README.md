@@ -2,10 +2,6 @@
 
 A Firefox extension that allows you to activate multiple PIM (Privileged Identity Management) roles simultaneously in Microsoft Entra and Azure resources.
 
-## Credits
-
-This Firefox extension was vibe-coded referencing the <a href="https://chromewebstore.google.com/detail/quickpim/gnhcemgacdhjljehgcnnjglhkegebikb">QuickPIM</a> Chrome extension by Daniel Bradley.
-
 ## Overview
 
 PIMfox for Entra streamlines the activation of multiple PIM roles across Microsoft Entra and Azure subscriptions. Instead of activating roles individually through each role's portal, this extension lets you select and activate multiple roles at once, saving time and reducing administrative overhead.
@@ -72,6 +68,10 @@ PIMfox for Entra implements several security measures to protect your credential
 - **No External Transmission**: Tokens never leave your browser - all API calls are made directly to Microsoft endpoints
 - **Memory Protection**: Decrypted tokens are only held in memory during active operations
 - **Auto-Cleanup**: Tokens can be manually cleared at any time from the extension popup
+
+## Credits
+
+This Firefox extension was vibe-coded referencing the <a href="https://chromewebstore.google.com/detail/quickpim/gnhcemgacdhjljehgcnnjglhkegebikb">QuickPIM</a> Chrome extension by Daniel Bradley.
 
 ## Privacy
 
