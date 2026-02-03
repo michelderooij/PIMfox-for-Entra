@@ -4,7 +4,7 @@ A Firefox extension that allows you to activate multiple PIM (Privileged Identit
 
 ## Credits
 
-This Firefox extension was vibe-coded referencing the <a href="https://github.com/DanielBradley1/QuickPIM">QuickPIM</a> Chrome extension by Daniel Bradley.
+This Firefox extension was vibe-coded referencing the <a href="https://chromewebstore.google.com/detail/quickpim/gnhcemgacdhjljehgcnnjglhkegebikb">QuickPIM</a> Chrome extension by Daniel Bradley.
 
 ## Overview
 
