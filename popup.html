@@ -10,12 +10,6 @@
     <h1>PIMfox</h1>
     <p class="subheading">An Entra PIM activator Firefox extension by <a href="https://eightwone.com/" target="_blank">Michel de Rooij</a></p>
 
-    <!-- Tab Navigation -->
-    <div class="tab-container">
-      <button class="tab-button active" data-tab="eligible">Eligible Roles</button>
-      <button class="tab-button" data-tab="active">Active Roles</button>
-    </div>
-
     <div id="status-bar">
       <span id="status-message">Loading...</span>
       <button id="refresh-button">Refresh</button>
@@ -38,24 +32,10 @@
         <li>Navigate around in the portal to ensure Microsoft Graph API calls are made</li>
         <li>Return to this extension and click "Refresh"</li>
       </ol>
-      
-      <details>
-        <summary>Manual Token Input</summary>
-        <div class="manual-token-input">
-          <p>If you have a Microsoft Graph access token, you can enter it here:</p>
-          <textarea id="manual-token" rows="5" placeholder="Paste your access token here (without the 'Bearer' prefix)"></textarea>
-          <button id="save-token-button" class="btn-secondary">Save Token</button>
-          <p class="token-tip">
-            <small>Tip: You can find a token by opening browser DevTools (F12), 
-                  going to Network tab, filtering for "graph.microsoft.com", 
-                  and viewing the "Authorization" request header.</small>
-          </p>
-        </div>
-      </details>
     </div>
     
     <div id="roles-container" class="hidden">
-      <h2>Your Eligible PIM Roles</h2>
+      <h2>Your PIM Roles</h2>
 
       <!-- Search and Filter Section -->
       <div id="search-filter-section" class="search-section">
@@ -66,7 +46,13 @@
         <div class="filter-chips">
           <button class="filter-chip active" data-filter="all">All</button>
           <button class="filter-chip" data-filter="directory">🔐 Entra ID</button>
+          <button class="filter-chip" data-filter="group">👥 PIM Groups</button>
           <button class="filter-chip" data-filter="azureResource">☁️ Azure Resource</button>
+        </div>
+        <div class="filter-chips status-filter">
+          <button class="filter-chip active" data-status-filter="all">All Status</button>
+          <button class="filter-chip" data-status-filter="eligible">Eligible</button>
+          <button class="filter-chip" data-status-filter="active">Active</button>
         </div>
         <div id="search-results-count" class="search-results-count hidden"></div>
       </div>
@@ -83,7 +69,7 @@
         
         <div class="control-group">
           <label for="justification-text">Justification:</label>
-          <textarea id="justification-text" placeholder="Enter reason for activation" rows="3"></textarea>
+          <textarea id="justification-text" placeholder="Enter reason for activation" rows="3" class="text-input"></textarea>
         </div>
         
         <div class="ticket-info-container">
@@ -99,15 +85,17 @@
         </div>
         
         <div class="control-group">
-          <button id="activate-button" class="btn-primary">Activate</button>
+          <button id="activate-button" class="btn-primary">Activate Selected Roles</button>
+        </div>
+        
+        <div id="activation-status" class="hidden">
+          <div id="activation-spinner" class="activation-spinner-container hidden">
+            <div class="spinner-small"></div>
+            <span>Activating role(s)...</span>
+          </div>
+          <div id="activation-message" class="hidden"></div>
         </div>
       </div>
-    </div>
-
-    <!-- Active Roles View -->
-    <div id="active-roles-container" class="hidden">
-      <h2>Currently Active Roles</h2>
-      <div id="active-roles-list"></div>
     </div>
 
     <div id="error-container" class="hidden">

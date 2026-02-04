@@ -269,15 +269,163 @@ function generateGuid() {
   });
 }
 
+// Function to activate PIM group memberships using PIM API
+async function activateGroupMemberships(selectedGroups, durationHours, justification, pimToken, ticketInfo = {}) {
+  if (!pimToken) {
+    throw new Error('No PIM API token available. Please browse to PIM > Groups in Azure Portal to capture the token.');
+  }
+
+  if (!selectedGroups || selectedGroups.length === 0) {
+    throw new Error('No groups selected for activation');
+  }
+
+  if (!justification || justification.trim() === '') {
+    throw new Error('Justification is required');
+  }
+
+  if (durationHours <= 0) {
+    throw new Error('Duration must be greater than 0 hours');
+  }
+
+  // Convert duration from hours to ISO 8601 duration format
+  const isoDuration = `PT${Math.round(durationHours * 60)}M`; // Convert to minutes for more precision
+
+  // Process each group activation request
+  const results = [];
+  const errors = [];
+  const skipped = [];
+
+  for (const group of selectedGroups) {
+    try {
+      // Validate required fields
+      if (!group.groupId) {
+        console.error('Group activation error: Missing groupId for group:', group);
+        errors.push({
+          group: group.groupName || 'Unknown Group',
+          success: false,
+          error: 'Missing group ID - please refresh and try again'
+        });
+        continue;
+      }
+      
+      if (!group.principalId) {
+        console.error('Group activation error: Missing principalId for group:', group);
+        errors.push({
+          group: group.groupName || group.groupId,
+          success: false,
+          error: 'Missing principal ID - please refresh and try again'
+        });
+        continue;
+      }
+      
+      if (!group.roleDefinitionId && !group.assignmentId) {
+        console.error('Group activation error: Missing roleDefinitionId for group:', group);
+        errors.push({
+          group: group.groupName || group.groupId,
+          success: false,
+          error: 'Missing role definition ID - please refresh and try again'
+        });
+        continue;
+      }
+      
+      // Prepare request body for PIM API (api.azrbac.mspim.azure.com)
+      const requestBody = {
+        "roleDefinitionId": group.roleDefinitionId,
+        "resourceId": group.groupId,
+        "subjectId": group.principalId,
+        "assignmentState": "Active",
+        "type": "UserAdd",
+        "reason": justification,
+        "schedule": {
+          "type": "Once",
+          "startDateTime": new Date().toISOString(),
+          "duration": isoDuration
+        }
+      };
+      
+      // Add ticket info if provided
+      if (ticketInfo.ticketNumber) {
+        requestBody.ticketNumber = ticketInfo.ticketNumber;
+        requestBody.ticketSystem = ticketInfo.ticketSystem || "Self-Service";
+      }
+      
+      // Use linked eligible role assignment ID if available for proper activation
+      if (group.assignmentId) {
+        requestBody.linkedEligibleRoleAssignmentId = group.assignmentId;
+      }
+
+      // Send activation request to PIM API
+      const response = await fetch(
+        'https://api.azrbac.mspim.azure.com/api/v2/privilegedAccess/aadGroups/roleAssignmentRequests',
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${pimToken}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody)
+        }
+      );
+
+      if (!response.ok) {
+        let errorMessage = 'Unknown error';
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error?.message || errorData.message || JSON.stringify(errorData);
+        } catch (e) {
+          errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+        }
+        
+        // Check if group membership is already activated
+        if (response.status === 400 && (errorMessage.includes('already exists') || errorMessage.includes('already active') || errorMessage.includes('RoleAssignmentExists') || errorMessage.includes('ActiveDuration'))) {
+          skipped.push({
+            group: group.groupName || group.groupId,
+            reason: 'Already activated'
+          });
+          continue; // Skip to next group
+        }
+        
+        throw new Error(
+          `API error (${response.status}): ${errorMessage}`
+        );
+      }
+
+      const responseData = await response.json();
+      results.push({
+        group: group.groupName || group.groupId,
+        success: true,
+        requestId: responseData.id || responseData.requestId
+      });
+
+    } catch (error) {
+      console.error('Group membership activation error:', error);
+      errors.push({
+        group: group.groupName || group.groupId,
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  return {
+    success: errors.length === 0,
+    results: results,
+    errors: errors,
+    skipped: skipped
+  };
+}
+
 // Function to activate roles (handles both directory and Azure resource roles)
-async function activateAllRoles(selectedRoles, durationHours, justification, graphToken, azureManagementToken, ticketInfo = {}) {
-  const directoryRoles = selectedRoles.filter(role => role.roleType !== 'azureResource');
+async function activateAllRoles(selectedRoles, durationHours, justification, graphToken, azureManagementToken, pimToken, ticketInfo = {}) {
+  const directoryRoles = selectedRoles.filter(role => role.roleType !== 'azureResource' && role.roleType !== 'group');
   const azureResourceRoles = selectedRoles.filter(role => role.roleType === 'azureResource');
+  const groupMemberships = selectedRoles.filter(role => role.roleType === 'group');
 
   const allResults = {
     success: true,
     results: [],
-    errors: []
+    errors: [],
+    skipped: []
   };
 
   // Activate directory roles
@@ -286,6 +434,7 @@ async function activateAllRoles(selectedRoles, durationHours, justification, gra
       const directoryResult = await activatePimRoles(directoryRoles, durationHours, justification, graphToken, ticketInfo);
       allResults.results.push(...directoryResult.results);
       allResults.errors.push(...directoryResult.errors);
+      if (directoryResult.skipped) allResults.skipped.push(...directoryResult.skipped);
     } catch (error) {
       allResults.errors.push({
         role: 'Directory Roles',
@@ -301,6 +450,7 @@ async function activateAllRoles(selectedRoles, durationHours, justification, gra
       const azureResourceResult = await activateAzureResourceRoles(azureResourceRoles, durationHours, justification, azureManagementToken, ticketInfo);
       allResults.results.push(...azureResourceResult.results);
       allResults.errors.push(...azureResourceResult.errors);
+      if (azureResourceResult.skipped) allResults.skipped.push(...azureResourceResult.skipped);
     } catch (error) {
       allResults.errors.push({
         role: 'Azure Resource Roles',
@@ -308,6 +458,29 @@ async function activateAllRoles(selectedRoles, durationHours, justification, gra
         error: error.message
       });
     }
+  }
+
+  // Activate group memberships (requires PIM API token, not Graph token)
+  if (groupMemberships.length > 0 && pimToken) {
+    try {
+      const groupResult = await activateGroupMemberships(groupMemberships, durationHours, justification, pimToken, ticketInfo);
+      allResults.results.push(...groupResult.results);
+      allResults.errors.push(...groupResult.errors);
+      if (groupResult.skipped) allResults.skipped.push(...groupResult.skipped);
+    } catch (error) {
+      allResults.errors.push({
+        group: 'PIM Group Memberships',
+        success: false,
+        error: error.message
+      });
+    }
+  } else if (groupMemberships.length > 0 && !pimToken) {
+    // No PIM token available for group activations
+    allResults.errors.push({
+      group: 'PIM Group Memberships',
+      success: false,
+      error: 'No PIM token available. Please browse to PIM > Groups in Azure Portal first.'
+    });
   }
 
   allResults.success = allResults.errors.length === 0;

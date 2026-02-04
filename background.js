@@ -200,6 +200,22 @@ browser.webRequest.onBeforeRequest.addListener(
   {urls: ["https://management.azure.com/*"]}
 );
 
+// Listen for web requests to PIM API
+browser.webRequest.onBeforeRequest.addListener(
+  function(details) {
+    // Skip extension's own requests
+    if (details.tabId === -1) {
+      return;
+    }
+    
+    if (details.url.includes('api.azrbac.mspim.azure.com')) {
+      // We found a request to PIM API from a portal page
+      captureAuthToken(details.requestId, details.url);
+    }
+  },
+  {urls: ["https://api.azrbac.mspim.azure.com/*"]}
+);
+
 // Capture authentication token from request headers
 browser.webRequest.onSendHeaders.addListener(
   function(details) {
@@ -295,6 +311,41 @@ browser.webRequest.onSendHeaders.addListener(
   ["requestHeaders"]
 );
 
+// Capture PIM API token from request headers
+browser.webRequest.onSendHeaders.addListener(
+  function(details) {
+    // Skip requests made by the extension itself
+    if (details.tabId === -1) {
+      return;
+    }
+    
+    if (details.url.includes('api.azrbac.mspim.azure.com')) {
+      const authHeader = details.requestHeaders.find(header =>
+        header.name.toLowerCase() === 'authorization'
+      );
+
+      if (authHeader && authHeader.value.startsWith('Bearer ')) {
+        // Extract the token (remove "Bearer " prefix)
+        const token = authHeader.value.substring(7);
+
+        // Encrypt and store the PIM API token separately
+        encryptToken(token).then(encryptedToken => {
+          browser.storage.local.set({
+            pimToken: encryptedToken,
+            pimTokenTimestamp: Date.now(),
+            pimTokenSource: details.url
+          });
+          console.log('PIM API token captured and encrypted from portal!');
+        }).catch(error => {
+          console.error('Failed to encrypt PIM token:', error);
+        });
+      }
+    }
+  },
+  {urls: ["https://api.azrbac.mspim.azure.com/*"]},
+  ["requestHeaders"]
+);
+
 // Function to capture auth token from a specific request
 function captureAuthToken(requestId, url) {
   console.log(`Monitoring request to: ${url}`);
@@ -370,11 +421,6 @@ browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
         sendResponse({ success: false, error: error.toString() });
       });
     return true;
-  } else if (request.action === "manualSetToken") {
-    setManualToken(request.token)
-      .then(() => sendResponse({ success: true }))
-      .catch(error => sendResponse({ success: false, error: error.toString() }));
-    return true;
   } else if (request.action === "clearToken") {
     clearToken()
       .then(() => sendResponse({ success: true }))
@@ -386,8 +432,8 @@ browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
       .catch(error => sendResponse({ success: false, error: error.toString() }));
     return true;
   } else if (request.action === "getTokens") {
-    // Get both tokens for role activation/deactivation
-    browser.storage.local.get(['graphToken', 'azureManagementToken'])
+    // Get all tokens for role activation/deactivation
+    browser.storage.local.get(['graphToken', 'azureManagementToken', 'pimToken'])
       .then(async (result) => {
         const tokens = {};
         
@@ -399,6 +445,10 @@ browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
           tokens.azureManagementToken = await decryptToken(result.azureManagementToken);
         }
         
+        if (result.pimToken) {
+          tokens.pimToken = await decryptToken(result.pimToken);
+        }
+        
         sendResponse({ success: true, tokens: tokens });
       })
       .catch(error => sendResponse({ success: false, error: error.toString() }));
@@ -406,36 +456,405 @@ browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
   }
 });
 
+// Cache for group names to avoid repeated API calls
+let groupNamesCache = {};
+let groupNamesCacheTime = null;
+const GROUP_NAMES_CACHE_VALIDITY_MS = 300000; // 5 minutes
+
+// Function to resolve group IDs to group names using Graph API
+async function resolveGroupNames(groupIds) {
+  if (!groupIds || groupIds.length === 0) return {};
+  
+  // Check cache first
+  const now = Date.now();
+  if (groupNamesCacheTime && (now - groupNamesCacheTime) < GROUP_NAMES_CACHE_VALIDITY_MS) {
+    // Return cached names for known IDs
+    const cachedResults = {};
+    let allCached = true;
+    for (const id of groupIds) {
+      if (groupNamesCache[id]) {
+        cachedResults[id] = groupNamesCache[id];
+      } else {
+        allCached = false;
+      }
+    }
+    if (allCached) {
+      console.log('Using cached group names');
+      return cachedResults;
+    }
+  }
+  
+  try {
+    // Get Graph token
+    const { graphToken: encryptedGraphToken } = await browser.storage.local.get(['graphToken']);
+    if (!encryptedGraphToken) {
+      console.warn('No Graph token for group name resolution');
+      return {};
+    }
+    
+    const graphToken = await decryptToken(encryptedGraphToken);
+    if (!graphToken) {
+      console.warn('Failed to decrypt Graph token for group name resolution');
+      return {};
+    }
+    
+    const results = {};
+    
+    // Fetch each group's details (batch if needed for large sets)
+    for (const groupId of groupIds) {
+      if (groupNamesCache[groupId]) {
+        results[groupId] = groupNamesCache[groupId];
+        continue;
+      }
+      
+      try {
+        const response = await fetch(
+          `https://graph.microsoft.com/v1.0/groups/${groupId}?$select=displayName`,
+          {
+            method: 'GET',
+            headers: {
+              'Authorization': `Bearer ${graphToken}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+        
+        if (response.ok) {
+          const group = await response.json();
+          if (group.displayName) {
+            results[groupId] = group.displayName;
+            groupNamesCache[groupId] = group.displayName;
+          }
+        } else {
+          console.warn(`Failed to fetch group ${groupId}: ${response.status}`);
+        }
+      } catch (err) {
+        console.warn(`Error fetching group ${groupId}:`, err);
+      }
+    }
+    
+    groupNamesCacheTime = Date.now();
+    return results;
+  } catch (error) {
+    console.error('Error resolving group names:', error);
+    return {};
+  }
+}
+
+// Function to get PIM group eligibilities
+async function getPimGroupEligibilities() {
+  try {
+    // Get PIM token and Graph token from storage
+    // PIM token is captured when user browses to PIM Groups in Azure Portal
+    const { graphToken: encryptedGraphToken, pimToken: encryptedPimToken, pimTokenTimestamp } = 
+      await browser.storage.local.get(['graphToken', 'pimToken', 'pimTokenTimestamp']);
+    
+    // PIM Groups requires the special PIM API token, not the Graph token
+    if (!encryptedPimToken) {
+      console.warn('No PIM token available. Please browse to PIM > Groups in Azure Portal to capture the token.');
+      return { value: [], permissionDenied: true, needsPimToken: true };
+    }
+    
+    // Decrypt the PIM token
+    const pimToken = await decryptToken(encryptedPimToken);
+    
+    if (!pimToken) {
+      throw new Error('Failed to decrypt PIM token.');
+    }
+    
+    // Check token age
+    if (pimTokenTimestamp) {
+      const tokenAgeInMinutes = (Date.now() - pimTokenTimestamp) / (1000 * 60);
+      if (tokenAgeInMinutes > 45) {
+        console.warn('PIM token may have expired. Please refresh the PIM Groups page in Azure Portal.');
+        return { value: [], permissionDenied: true, tokenExpired: true };
+      }
+    }
+    
+    // Extract principalId from PIM token (or Graph token as fallback)
+    let principalId = extractPrincipalId(pimToken);
+    if (!principalId && encryptedGraphToken) {
+      const graphToken = await decryptToken(encryptedGraphToken);
+      principalId = extractPrincipalId(graphToken);
+    }
+    if (!principalId) {
+      throw new Error('Could not extract user ID from token.');
+    }
+    
+    console.log('Fetching PIM group eligibilities using PIM API');
+    
+    // Use the PIM API endpoint (same as Azure Portal uses)
+    const filter = encodeURIComponent(`(subject/id eq '${principalId}') and (assignmentState eq 'Eligible')`);
+    const expand = encodeURIComponent('linkedEligibleRoleAssignment,subject,scopedResource,roleDefinition($expand=resource)');
+    
+    const response = await fetch(
+      `https://api.azrbac.mspim.azure.com/api/v2/privilegedAccess/aadGroups/roleAssignments?$expand=${expand}&$filter=${filter}&$count=true`,
+      {
+        method: "GET",
+        headers: {
+          'Authorization': `Bearer ${pimToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    if (!response.ok) {
+      if (response.status === 403 || response.status === 401) {
+        console.warn('PIM group eligibilities fetch failed - permission denied. Status:', response.status);
+        return { value: [], permissionDenied: true };
+      }
+      throw new Error(`API call failed: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    
+    // Transform the response to match our expected format
+    const transformedData = { value: [] };
+    
+    if (data.value && data.value.length > 0) {
+      // Helper to extract group ID from various possible response fields
+      const extractGroupId = (assignment) => {
+        return assignment.scopedResource?.id || 
+               assignment.resourceId || 
+               assignment.resource?.id ||
+               assignment.scopedResourceId ||
+               assignment.roleDefinition?.resource?.id || '';
+      };
+      
+      // Collect group IDs that need name resolution
+      const groupIdsNeedingNames = [];
+      data.value.forEach(assignment => {
+        const groupId = extractGroupId(assignment);
+        const hasName = assignment.scopedResource?.displayName && 
+                        assignment.scopedResource.displayName !== 'Unknown Group';
+        if (groupId && !hasName) {
+          groupIdsNeedingNames.push(groupId);
+        }
+      });
+      
+      // Resolve group names from Graph API if needed
+      let resolvedNames = {};
+      if (groupIdsNeedingNames.length > 0) {
+        console.log(`Resolving ${groupIdsNeedingNames.length} group name(s) from Graph API`);
+        resolvedNames = await resolveGroupNames(groupIdsNeedingNames);
+      }
+      
+      transformedData.value = data.value.map(assignment => {
+        const groupId = extractGroupId(assignment);
+        let groupName = assignment.scopedResource?.displayName || assignment.scopedResource?.externalId;
+        
+        // If no name from PIM API, try resolved names
+        if (!groupName || groupName === 'Unknown Group') {
+          groupName = resolvedNames[groupId] || 'Unknown Group';
+        }
+        
+        // Extract role definition ID
+        const roleDefId = assignment.roleDefinition?.id || assignment.roleDefinitionId;
+        const accessType = assignment.roleDefinition?.displayName === 'Owner' ? 'owner' : 'member';
+        
+        return {
+          groupId: groupId,
+          groupName: groupName,
+          principalId: assignment.subject?.id || principalId,
+          accessId: accessType,
+          roleDefinitionId: roleDefId,
+          assignmentType: 'group',
+          assignmentId: assignment.id,
+          startDateTime: assignment.startDateTime,
+          endDateTime: assignment.endDateTime
+        };
+      });
+    }
+    
+    return transformedData;
+  } catch (error) {
+    console.error('Error getting PIM group eligibilities:', error);
+    return { value: [], error: error.toString() };
+  }
+}
+
+// Function to get active PIM group memberships
+async function getActiveGroupMemberships() {
+  try {
+    // Get PIM token and Graph token from storage
+    const { graphToken: encryptedGraphToken, pimToken: encryptedPimToken, pimTokenTimestamp } = 
+      await browser.storage.local.get(['graphToken', 'pimToken', 'pimTokenTimestamp']);
+    
+    // PIM Groups requires the special PIM API token
+    if (!encryptedPimToken) {
+      console.warn('No PIM token available for active group memberships.');
+      return { value: [], permissionDenied: true, needsPimToken: true };
+    }
+    
+    // Decrypt the PIM token
+    const pimToken = await decryptToken(encryptedPimToken);
+    
+    if (!pimToken) {
+      throw new Error('Failed to decrypt PIM token.');
+    }
+    
+    // Check token age
+    if (pimTokenTimestamp) {
+      const tokenAgeInMinutes = (Date.now() - pimTokenTimestamp) / (1000 * 60);
+      if (tokenAgeInMinutes > 45) {
+        console.warn('PIM token may have expired.');
+        return { value: [], permissionDenied: true, tokenExpired: true };
+      }
+    }
+    
+    // Extract principalId from PIM token (or Graph token as fallback)
+    let principalId = extractPrincipalId(pimToken);
+    if (!principalId && encryptedGraphToken) {
+      const graphToken = await decryptToken(encryptedGraphToken);
+      principalId = extractPrincipalId(graphToken);
+    }
+    if (!principalId) {
+      throw new Error('Could not extract user ID from token.');
+    }
+    
+    console.log('Fetching active PIM group memberships using PIM API');
+    
+    // Use the PIM API endpoint for active assignments
+    const filter = encodeURIComponent(`(subject/id eq '${principalId}') and (assignmentState eq 'Active')`);
+    const expand = encodeURIComponent('linkedEligibleRoleAssignment,subject,scopedResource,roleDefinition($expand=resource)');
+    
+    const response = await fetch(
+      `https://api.azrbac.mspim.azure.com/api/v2/privilegedAccess/aadGroups/roleAssignments?$expand=${expand}&$filter=${filter}&$count=true`,
+      {
+        method: "GET",
+        headers: {
+          'Authorization': `Bearer ${pimToken}`,
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
+      }
+    );
+    
+    if (!response.ok) {
+      if (response.status === 403 || response.status === 401) {
+        console.warn('Active PIM group memberships fetch failed - permission denied. Status:', response.status);
+        return { value: [], permissionDenied: true };
+      }
+      throw new Error(`API call failed: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    
+    // Transform the response to match our expected format
+    const transformedData = { value: [] };
+    
+    if (data.value && data.value.length > 0) {
+      const now = new Date();
+      
+      // Filter for currently active assignments
+      const activeAssignments = data.value.filter(assignment => {
+        const startDateTime = assignment.startDateTime;
+        const endDateTime = assignment.endDateTime;
+        
+        if (!startDateTime) return false;
+        
+        const start = new Date(startDateTime);
+        const end = endDateTime ? new Date(endDateTime) : null;
+        
+        if (end) {
+          return start <= now && end > now;
+        } else {
+          return start <= now;
+        }
+      });
+      
+      // Helper to extract group ID
+      const extractGroupId = (assignment) => {
+        return assignment.scopedResource?.id || 
+               assignment.resourceId || 
+               assignment.resource?.id ||
+               assignment.scopedResourceId ||
+               assignment.roleDefinition?.resource?.id || '';
+      };
+      
+      // Collect group IDs that need name resolution
+      const groupIdsNeedingNames = [];
+      activeAssignments.forEach(assignment => {
+        const groupId = extractGroupId(assignment);
+        const hasName = assignment.scopedResource?.displayName && 
+                        assignment.scopedResource.displayName !== 'Unknown Group';
+        if (groupId && !hasName) {
+          groupIdsNeedingNames.push(groupId);
+        }
+      });
+      
+      // Resolve group names from Graph API if needed
+      let resolvedNames = {};
+      if (groupIdsNeedingNames.length > 0) {
+        console.log(`Resolving ${groupIdsNeedingNames.length} active group name(s) from Graph API`);
+        resolvedNames = await resolveGroupNames(groupIdsNeedingNames);
+      }
+      
+      transformedData.value = activeAssignments.map(assignment => {
+        const groupId = extractGroupId(assignment);
+        let groupName = assignment.scopedResource?.displayName || assignment.scopedResource?.externalId;
+        
+        // If no name from PIM API, try resolved names
+        if (!groupName || groupName === 'Unknown Group') {
+          groupName = resolvedNames[groupId] || 'Unknown Group';
+        }
+        
+        // Extract role definition ID
+        const roleDefId = assignment.roleDefinition?.id || assignment.roleDefinitionId;
+        const accessType = assignment.roleDefinition?.displayName === 'Owner' ? 'owner' : 'member';
+        
+        return {
+          groupId: groupId,
+          groupName: groupName,
+          principalId: assignment.subject?.id || principalId,
+          accessId: accessType,
+          roleDefinitionId: roleDefId,
+          assignmentType: 'group',
+          assignmentId: assignment.id,
+          startDateTime: assignment.startDateTime,
+          endDateTime: assignment.endDateTime
+        };
+      });
+    }
+    
+    return transformedData;
+  } catch (error) {
+    console.error('Error getting active PIM group memberships:', error);
+    return { value: [], error: error.toString() };
+  }
+}
+
 // Function to get PIM roles using the stored token
 async function getPimRoles() {
   try {
-    // Get token from storage
-    const { graphToken: encryptedToken, tokenTimestamp } = 
+    // Get Graph token from storage - this is all we need now
+    const { graphToken: encryptedGraphToken, tokenTimestamp } = 
       await browser.storage.local.get(['graphToken', 'tokenTimestamp']);
     
-    if (!encryptedToken) {
-      throw new Error('No Microsoft Graph token found. Please visit a Microsoft service like portal.azure.com first.');
+    if (!encryptedGraphToken) {
+      console.warn('No Graph token available for PIM directory roles.');
+      return { value: [], permissionDenied: true };
     }
     
-    // Decrypt the token
-    const graphToken = await decryptToken(encryptedToken);
+    // Decrypt the Graph token
+    const graphToken = await decryptToken(encryptedGraphToken);
     
     if (!graphToken) {
-      throw new Error('Failed to decrypt token. Please clear tokens and re-authenticate.');
+      throw new Error('Failed to decrypt Graph token. Please clear tokens and re-authenticate.');
     }
     
     // Check if token is older than 45 minutes (tokens typically expire after 1 hour)
-    if (!tokenTimestamp) {
-      throw new Error('Token timestamp missing. Please re-authenticate.');
-    }
-    const tokenAgeInMinutes = (Date.now() - tokenTimestamp) / (1000 * 60);
-    if (tokenAgeInMinutes > 45) {
-      throw new Error('Token may have expired. Please refresh your Microsoft service session.');
+    if (tokenTimestamp) {
+      const tokenAgeInMinutes = (Date.now() - tokenTimestamp) / (1000 * 60);
+      if (tokenAgeInMinutes > 45) {
+        console.warn('Graph token may have expired.');
+      }
     }
     
-    console.log('Using captured token to fetch PIM roles');
+    console.log('Fetching PIM directory role eligibilities using Graph API');
     
-    // Extract principalId from token using the decoder function
+    // Extract principalId from Graph token
     const principalId = extractPrincipalId(graphToken);
     
     if (!principalId) {
@@ -444,9 +863,11 @@ async function getPimRoles() {
     
     console.log('Using principalId:', principalId);
     
-    // Call the PIM roles endpoint with the extracted principalId
+    // Use Microsoft Graph API for directory role eligibilities
+    const filter = encodeURIComponent(`principalId eq '${principalId}'`);
+    
     const response = await fetch(
-      `https://graph.microsoft.com/beta/roleManagement/directory/roleEligibilitySchedules?$filter=principalId eq '${principalId}'`, 
+      `https://graph.microsoft.com/v1.0/roleManagement/directory/roleEligibilityScheduleInstances?$filter=${filter}&$expand=roleDefinition`, 
       {
         method: "GET",
         headers: {
@@ -457,29 +878,37 @@ async function getPimRoles() {
     );
     
     if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        console.warn('PIM directory roles fetch failed - permission denied or invalid token. Status:', response.status);
+        return { value: [], permissionDenied: true };
+      }
       throw new Error(`API call failed: ${response.status} ${response.statusText}`);
     }
     
     const data = await response.json();
     
-    // Resolve role definition names (non-blocking)
-    // Only use cache to avoid blocking popup rendering with fetch
-    if (data.value && data.value.length > 0) {
-      const roleDefinitions = getRoleDefinitionsFromCacheOnly();
-      
-      if (roleDefinitions && Object.keys(roleDefinitions).length > 0) {
-        // Map role definition IDs to friendly names
-        data.value = data.value.map(role => {
-          if (role.roleDefinitionId && roleDefinitions[role.roleDefinitionId]) {
-            role.roleName = roleDefinitions[role.roleDefinitionId];
+    // Transform Graph API response to match expected format
+    const transformedData = {
+      value: (data.value || []).map(assignment => ({
+        id: assignment.id,
+        roleDefinitionId: assignment.roleDefinitionId,
+        roleName: assignment.roleDefinition?.displayName,
+        principalId: assignment.principalId || principalId,
+        directoryScopeId: assignment.directoryScopeId || '/',
+        scopeDisplayName: assignment.directoryScopeId === '/' ? 'Directory' : assignment.directoryScopeId,
+        scheduleInfo: {
+          startDateTime: assignment.startDateTime,
+          expiration: {
+            endDateTime: assignment.endDateTime,
+            type: assignment.endDateTime ? 'afterDateTime' : 'noExpiration'
           }
-          return role;
-        });
-      }
-      // If no cache, roles will just use IDs (pre-fetch will populate for next time)
-    }
+        },
+        memberType: assignment.memberType || 'Direct',
+        assignmentType: 'direct'
+      }))
+    };
     
-    return data;
+    return transformedData;
   } catch (error) {
     console.error('Error getting PIM roles:', error);
     throw error;
@@ -585,27 +1014,13 @@ async function getTokenStatus() {
   };
 }
 
-// Function to set a token manually
-async function setManualToken(token) {
-  if (!token || token.length < 50) {
-    throw new Error('Invalid token provided');
-  }
-  
-  // Encrypt token before storage
-  const encryptedToken = await encryptToken(token);
-  
-  await browser.storage.local.set({
-    graphToken: encryptedToken,
-    tokenTimestamp: Date.now(),
-    tokenSource: 'manual-entry'
-  });
-  
-  return true;
-}
-
 // Function to clear the stored token
 async function clearToken() {
-  await browser.storage.local.remove(['graphToken', 'tokenTimestamp', 'tokenSource', 'azureManagementToken', 'azureManagementTokenTimestamp', 'azureManagementTokenSource']);
+  await browser.storage.local.remove([
+    'graphToken', 'tokenTimestamp', 'tokenSource',
+    'azureManagementToken', 'azureManagementTokenTimestamp', 'azureManagementTokenSource',
+    'pimToken', 'pimTokenTimestamp', 'pimTokenSource'
+  ]);
   return true;
 }
 
@@ -728,6 +1143,7 @@ async function getAllRoles() {
     const results = {
       directoryRoles: { value: [] },
       azureResourceRoles: { value: [] },
+      groupEligibilities: { value: [] },
       errors: []
     };
 
@@ -735,6 +1151,15 @@ async function getAllRoles() {
     try {
       const directoryRoles = await getPimRoles();
       results.directoryRoles = directoryRoles;
+      
+      // Add warning if permission was denied
+      if (directoryRoles.permissionDenied) {
+        results.errors.push({ 
+          type: 'directory', 
+          error: 'Could not fetch directory roles - please browse to Azure Portal first.',
+          warning: true
+        });
+      }
     } catch (error) {
       console.error('Error fetching directory roles:', error);
       results.errors.push({ type: 'directory', error: error.toString() });
@@ -749,6 +1174,38 @@ async function getAllRoles() {
       results.errors.push({ type: 'azureResource', error: error.toString() });
     }
 
+    // Try to get PIM group eligibilities
+    try {
+      const groupEligibilities = await getPimGroupEligibilities();
+      results.groupEligibilities = groupEligibilities;
+      
+      // Add specific warning if PIM token is needed
+      if (groupEligibilities.needsPimToken) {
+        results.errors.push({ 
+          type: 'groupEligibilities', 
+          error: 'PIM Groups require a separate token. Please browse to PIM > Groups in Azure Portal to capture the token.',
+          warning: true
+        });
+      } else if (groupEligibilities.tokenExpired) {
+        results.errors.push({ 
+          type: 'groupEligibilities', 
+          error: 'PIM token may have expired. Please refresh the PIM Groups page in Azure Portal.',
+          warning: true
+        });
+      } else if (groupEligibilities.permissionDenied) {
+        results.errors.push({ 
+          type: 'groupEligibilities', 
+          error: 'Could not fetch group eligibilities - please browse to PIM > Groups in Azure Portal.',
+          warning: true
+        });
+      } else if (groupEligibilities.error) {
+        results.errors.push({ type: 'groupEligibilities', error: groupEligibilities.error, warning: true });
+      }
+    } catch (error) {
+      console.error('Error fetching group eligibilities:', error);
+      results.errors.push({ type: 'groupEligibilities', error: error.toString(), warning: true });
+    }
+
     return results;
   } catch (error) {
     console.error('Error getting all roles:', error);
@@ -759,33 +1216,33 @@ async function getAllRoles() {
 // Function to get active directory roles
 async function getActiveDirectoryRoles() {
   try {
-    // Get token from storage
-    const { graphToken: encryptedToken, tokenTimestamp } =
+    // Get Graph token from storage - this is all we need now
+    const { graphToken: encryptedGraphToken, tokenTimestamp } =
       await browser.storage.local.get(['graphToken', 'tokenTimestamp']);
 
-    if (!encryptedToken) {
-      throw new Error('No Microsoft Graph token found. Please visit a Microsoft service like portal.azure.com first.');
+    if (!encryptedGraphToken) {
+      console.warn('No Graph token available for active directory roles.');
+      return { value: [], permissionDenied: true };
     }
     
-    // Decrypt the token
-    const graphToken = await decryptToken(encryptedToken);
+    // Decrypt the Graph token
+    const graphToken = await decryptToken(encryptedGraphToken);
     
     if (!graphToken) {
-      throw new Error('Failed to decrypt token. Please clear tokens and re-authenticate.');
+      throw new Error('Failed to decrypt Graph token. Please clear tokens and re-authenticate.');
     }
 
     // Check if token is older than 45 minutes
-    if (!tokenTimestamp) {
-      throw new Error('Token timestamp missing. Please re-authenticate.');
-    }
-    const tokenAgeInMinutes = (Date.now() - tokenTimestamp) / (1000 * 60);
-    if (tokenAgeInMinutes > 45) {
-      throw new Error('Token may have expired. Please refresh your Microsoft service session.');
+    if (tokenTimestamp) {
+      const tokenAgeInMinutes = (Date.now() - tokenTimestamp) / (1000 * 60);
+      if (tokenAgeInMinutes > 45) {
+        console.warn('Graph token may have expired.');
+      }
     }
 
-    console.log('Using captured token to fetch active directory roles');
+    console.log('Fetching active directory roles using Graph API');
 
-    // Extract principalId from token
+    // Extract principalId from Graph token
     const principalId = extractPrincipalId(graphToken);
 
     if (!principalId) {
@@ -794,10 +1251,11 @@ async function getActiveDirectoryRoles() {
 
     console.log('Using principalId:', principalId);
 
-    // Use roleAssignmentScheduleInstances to get currently active assignments
-    // This is more accurate than roleAssignmentScheduleRequests which includes historical data
+    // Use Microsoft Graph API for active directory role assignments
+    const filter = encodeURIComponent(`principalId eq '${principalId}'`);
+
     const response = await fetch(
-      `https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignmentScheduleInstances/filterByCurrentUser(on='principal')`,
+      `https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignmentScheduleInstances?$filter=${filter}&$expand=roleDefinition`,
       {
         method: "GET",
         headers: {
@@ -810,6 +1268,10 @@ async function getActiveDirectoryRoles() {
     );
 
     if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        console.warn('Active directory roles fetch failed - permission denied or invalid token. Status:', response.status);
+        return { value: [], permissionDenied: true };
+      }
       throw new Error(`API call failed: ${response.status} ${response.statusText}`);
     }
 
@@ -817,48 +1279,34 @@ async function getActiveDirectoryRoles() {
 
     console.log('Active directory roles API response:', data);
 
-    // Filter for only active PIM assignments (time-bound assignments)
-    if (data && data.value && Array.isArray(data.value)) {
-      const now = new Date();
-      
-      data.value = data.value.filter(role => {
-        if (!role) return false;
-        
-        // Check if this is a time-bound assignment (PIM activation, not permanent)
-        const startDateTime = role.startDateTime;
-        const endDateTime = role.endDateTime;
-        
-        // Must have both start and end times for PIM activations
-        if (!startDateTime || !endDateTime) {
-          return false; // Skip permanent assignments
-        }
-        
-        const start = new Date(startDateTime);
-        const end = new Date(endDateTime);
-        
-        // Only include if currently active (started and not expired)
-        return start <= now && end > now;
-      });
-
-      // Resolve role definition names
-      if (data.value.length > 0) {
-        const roleDefinitions = await getRoleDefinitions(graphToken);
-
-        data.value = data.value.map(role => {
-          if (!role) return role;
-          if (role.roleDefinitionId && roleDefinitions[role.roleDefinitionId]) {
-            role.roleName = roleDefinitions[role.roleDefinitionId];
-          }
-          return role;
-        });
+    // Filter for only time-bound assignments (PIM activations, not permanent)
+    const now = new Date();
+    const filteredValue = (data.value || []).filter(assignment => {
+      // Must have endDateTime for PIM activations (not permanent)
+      if (!assignment.endDateTime) {
+        return false;
       }
-    } else {
-      // Return empty result if data structure is invalid
-      console.warn('Invalid data structure in active directory roles response');
-      return { value: [] };
-    }
+      const end = new Date(assignment.endDateTime);
+      return end > now;
+    });
 
-    return data;
+    // Transform Graph API response to match expected format
+    const transformedData = {
+      value: filteredValue.map(assignment => ({
+        id: assignment.id,
+        roleDefinitionId: assignment.roleDefinitionId,
+        roleName: assignment.roleDefinition?.displayName,
+        principalId: assignment.principalId || principalId,
+        directoryScopeId: assignment.directoryScopeId || '/',
+        scopeDisplayName: assignment.directoryScopeId === '/' ? 'Directory' : assignment.directoryScopeId,
+        startDateTime: assignment.startDateTime,
+        endDateTime: assignment.endDateTime,
+        memberType: assignment.memberType || 'Direct',
+        assignmentType: 'direct'
+      }))
+    };
+
+    return transformedData;
   } catch (error) {
     console.error('Error getting active directory roles:', error);
     console.error('Error stack:', error.stack);
@@ -1035,6 +1483,7 @@ async function getActiveRoles() {
     const results = {
       activeDirectoryRoles: { value: [] },
       activeAzureResourceRoles: { value: [] },
+      activeGroupMemberships: { value: [] },
       errors: []
     };
 
@@ -1055,6 +1504,38 @@ async function getActiveRoles() {
     } catch (error) {
       console.error('Error fetching active Azure resource roles:', error);
       results.errors.push({ type: 'activeAzureResource', error: error.toString() });
+    }
+
+    // Try to get active group memberships
+    try {
+      const activeGroupMemberships = await getActiveGroupMemberships();
+      results.activeGroupMemberships = activeGroupMemberships;
+      
+      // Add specific warning if PIM token is needed
+      if (activeGroupMemberships.needsPimToken) {
+        results.errors.push({ 
+          type: 'activeGroupMemberships', 
+          error: 'PIM Groups require a separate token. Please browse to PIM > Groups in Azure Portal.',
+          warning: true
+        });
+      } else if (activeGroupMemberships.tokenExpired) {
+        results.errors.push({ 
+          type: 'activeGroupMemberships', 
+          error: 'PIM token may have expired. Please refresh the PIM Groups page in Azure Portal.',
+          warning: true
+        });
+      } else if (activeGroupMemberships.permissionDenied) {
+        results.errors.push({ 
+          type: 'activeGroupMemberships', 
+          error: 'Could not fetch active group memberships - please browse to PIM > Groups in Azure Portal.',
+          warning: true
+        });
+      } else if (activeGroupMemberships.error) {
+        results.errors.push({ type: 'activeGroupMemberships', error: activeGroupMemberships.error, warning: true });
+      }
+    } catch (error) {
+      console.error('Error fetching active group memberships:', error);
+      results.errors.push({ type: 'activeGroupMemberships', error: error.toString(), warning: true });
     }
 
     console.log('getActiveRoles returning:', results);

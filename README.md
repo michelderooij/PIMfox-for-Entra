@@ -7,26 +7,26 @@ A Firefox extension that allows you to activate multiple PIM (Privileged Identit
 PIMfox for Entra streamlines the activation of multiple PIM roles across Microsoft Entra and Azure subscriptions. Instead of activating roles individually through each role's portal, this extension lets you select and activate multiple roles at once, saving time and reducing administrative overhead.
 
 <p align="left">
-  <a href="assets/screenshot.png"><img src="assets/screenshot_preview.png" alt="PIMfox for Entra" width="600"></a>
+  [assets/screenshot.png](<img src="assets/screenshot_preview.png" alt="PIMfox for Entra" width="600">)
 </p>
 
 It works by catching bearer tokens from requests to Microsoft Graph or Azure Management APIs. It then stores those tokens within your browser's local storage and uses them to obtain and activate your selected PIM roles.
 
 ## Features
 
-- Activate multiple PIM roles simultaneously (Entra ID and Azure resources)
+- Activate multiple PIM roles simultaneously (Entra ID, Azure resources, and PIM Groups)
 - Customizable activation duration
-- Simple and intuitive user interface
-- Secure authentication using the existing browser bearer token
-- Notification system for role activation status
+- Reusing authentication when already signed (automatic token capture)
+- Inline activation status with spinner and success/error messages
 - Search and filter roles
 - Active roles monitoring with countdown timers
+- Support for PIM-enabled groups
 
 ## Installation
 
 ### From Firefox Add-ons store 
 
-The extension is available in the add-in store at [https://addons.mozilla.org/en-US/firefox/addon/pimfox-for-entra/](https://addons.mozilla.org/en-US/firefox/addon/pimfox-for-entra/)
+The extension is available in the [https://addons.mozilla.org/en-US/firefox/addon/pimfox-for-entra/](Firefox Add-Ons Extensions store).
 
 ### Manual Installation (testing)
 
@@ -51,10 +51,6 @@ The extension is available in the add-in store at [https://addons.mozilla.org/en
 10. Click "Activate Selected Roles"
 11. Switch to the "Active Roles" tab to monitor your activated roles with countdown timers
 
-## To Do
-
-- Support for group-based PIM roles
-
 ## Limitations
 
 - Unable to activate roles protected by Authentication Contexts
@@ -69,13 +65,18 @@ PIMfox for Entra implements several security measures to protect your credential
 - **Memory Protection**: Decrypted tokens are only held in memory during active operations
 - **Auto-Cleanup**: Tokens can be manually cleared at any time from the extension popup
 
-## Credits
+## Changelog 
 
-This Firefox extension was vibe-coded referencing the <a href="https://chromewebstore.google.com/detail/quickpim/gnhcemgacdhjljehgcnnjglhkegebikb">QuickPIM</a> Chrome extension by Daniel Bradley.
+1.0.0   Initial release
+1.1.0   Added support for PIM Groups
 
 ## Privacy
 
 PIMfox for Entra does not collect or transmit any personal data. All authentication is handled directly within the browser.
+
+## Credits
+
+This Firefox extension was vibe-coded referencing the [https://chromewebstore.google.com/detail/quickpim/gnhcemgacdhjljehgcnnjglhkegebikb](QuickPIM) Chrome extension by Daniel Bradley.
 
 ## Contributing
 
@@ -87,4 +88,4 @@ If you encounter any issues or have questions, please open an issue on GitHub.
 
 ## License
 
-This project is licensed under the MIT License - see the <a href="LICENSE">LICENSE</a> file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

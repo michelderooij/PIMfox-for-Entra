@@ -15,8 +15,6 @@ document.addEventListener('DOMContentLoaded', function() {
   const rolesList = document.getElementById('roles-list');
   const errorContainer = document.getElementById('error-container');
   const errorDetails = document.getElementById('error-details');
-  const manualTokenInput = document.getElementById('manual-token');
-  const saveTokenButton = document.getElementById('save-token-button');
   const clearTokenButton = document.getElementById('clear-token-button');
   const initialLoading = document.getElementById('initial-loading');
   
@@ -34,18 +32,15 @@ document.addEventListener('DOMContentLoaded', function() {
   const roleSearch = document.getElementById('role-search');
   const clearSearchBtn = document.getElementById('clear-search');
   const searchResultsCount = document.getElementById('search-results-count');
-  const filterChips = document.querySelectorAll('.filter-chip');
-
-  // Tab navigation elements
-  const tabButtons = document.querySelectorAll('.tab-button');
-  const activeRolesContainer = document.getElementById('active-roles-container');
-  const activeRolesList = document.getElementById('active-roles-list');
+  const filterChips = document.querySelectorAll('.filter-chip[data-filter]');
+  const statusFilterChips = document.querySelectorAll('.filter-chip[data-status-filter]');
 
   // State for search and filter
   let currentSearchTerm = '';
   let currentFilter = 'all';
-  let currentTab = 'eligible';
-  let activeRolesInterval = null;
+  let currentStatusFilter = 'all';
+  let activeTimerIntervals = [];
+  let refreshInterval = null;
 
   // Initialize immediately - simple and straightforward
   console.log('[POPUP] Calling init() immediately');
@@ -54,24 +49,6 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // Setup event listeners
   refreshButton.addEventListener('click', init);
-  
-  saveTokenButton.addEventListener('click', function() {
-    const token = manualTokenInput.value.trim();
-    if (token) {
-      statusMessage.textContent = 'Saving token...';
-      browser.runtime.sendMessage(
-        { action: 'manualSetToken', token: token },
-        function(response) {
-          if (response && response.success) {
-            manualTokenInput.value = '';
-            init(); // Refresh the UI
-          } else {
-            showError(response?.error || 'Failed to save token');
-          }
-        }
-      );
-    }
-  });
   
   clearTokenButton.addEventListener('click', function() {
     browser.runtime.sendMessage({ action: 'clearToken' }, function(response) {
@@ -120,7 +97,7 @@ document.addEventListener('DOMContentLoaded', function() {
   // Filter chip event listeners
   filterChips.forEach(chip => {
     chip.addEventListener('click', function() {
-      // Remove active class from all chips
+      // Remove active class from all type filter chips
       filterChips.forEach(c => c.classList.remove('active'));
 
       // Add active class to clicked chip
@@ -133,6 +110,22 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   });
 
+  // Status filter chip event listeners
+  statusFilterChips.forEach(chip => {
+    chip.addEventListener('click', function() {
+      // Remove active class from all status filter chips
+      statusFilterChips.forEach(c => c.classList.remove('active'));
+
+      // Add active class to clicked chip
+      this.classList.add('active');
+
+      // Update current status filter
+      currentStatusFilter = this.dataset.statusFilter;
+
+      filterRoles();
+    });
+  });
+
   // Keyboard shortcut: Ctrl+F to focus search
   document.addEventListener('keydown', function(e) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
@@ -140,14 +133,6 @@ document.addEventListener('DOMContentLoaded', function() {
       roleSearch.focus();
       roleSearch.select();
     }
-  });
-
-  // Tab switching event listeners
-  tabButtons.forEach(button => {
-    button.addEventListener('click', function() {
-      const targetTab = this.dataset.tab;
-      switchTab(targetTab);
-    });
   });
 
   // Add activation button event listener
@@ -176,15 +161,17 @@ document.addEventListener('DOMContentLoaded', function() {
     statusMessage.textContent = 'Activating roles...';
     activateButton.disabled = true;
 
-    // Get both tokens from storage
-    browser.storage.local.get(['graphToken', 'azureManagementToken'], async function(data) {
+    // Get all tokens from storage
+    browser.storage.local.get(['graphToken', 'azureManagementToken', 'pimToken'], async function(data) {
       try {
         const encryptedGraphToken = data.graphToken;
         const encryptedAzureToken = data.azureManagementToken;
+        const encryptedPimToken = data.pimToken;
 
         // Check which types of roles are selected
-        const hasDirectoryRoles = selectedRoles.some(r => r.roleType !== 'azureResource');
+        const hasDirectoryRoles = selectedRoles.some(r => r.roleType !== 'azureResource' && r.roleType !== 'group');
         const hasAzureResourceRoles = selectedRoles.some(r => r.roleType === 'azureResource');
+        const hasGroupMemberships = selectedRoles.some(r => r.roleType === 'group');
 
         // Validate encrypted tokens exist
         if (hasDirectoryRoles && !encryptedGraphToken) {
@@ -199,9 +186,16 @@ document.addEventListener('DOMContentLoaded', function() {
           return;
         }
 
+        if (hasGroupMemberships && !encryptedPimToken) {
+          showError('No PIM API token found for group memberships. Please visit PIM Groups in Azure Portal first.');
+          activateButton.disabled = false;
+          return;
+        }
+
         // Decrypt tokens before using them
         let graphToken = null;
         let azureManagementToken = null;
+        let pimToken = null;
 
         if (hasDirectoryRoles && encryptedGraphToken) {
           graphToken = await new Promise((resolve, reject) => {
@@ -233,28 +227,70 @@ document.addEventListener('DOMContentLoaded', function() {
           });
         }
 
+        if (hasGroupMemberships && encryptedPimToken) {
+          pimToken = await new Promise((resolve, reject) => {
+            browser.runtime.sendMessage({
+              action: 'decryptToken',
+              encryptedToken: encryptedPimToken
+            }, (response) => {
+              if (response && response.success) {
+                resolve(response.token);
+              } else {
+                reject(new Error('Failed to decrypt PIM token'));
+              }
+            });
+          });
+        }
+
         // Prepare ticket information
         const ticketInfo = {};
         if (ticketSystemValue) ticketInfo.ticketSystem = ticketSystemValue;
         if (ticketNumberValue) ticketInfo.ticketNumber = ticketNumberValue;
 
+        // Show activation spinner
+        const activationStatus = document.getElementById('activation-status');
+        const activationSpinner = document.getElementById('activation-spinner');
+        const activationMessage = document.getElementById('activation-message');
+        
+        activationStatus.classList.remove('hidden');
+        activationSpinner.classList.remove('hidden');
+        activationMessage.classList.add('hidden');
+        
         // Call the unified activation function with decrypted tokens
-        activateAllRoles(selectedRoles, duration, justification, graphToken, azureManagementToken, ticketInfo)
+        activateAllRoles(selectedRoles, duration, justification, graphToken, azureManagementToken, pimToken, ticketInfo)
         .then(result => {
+          // Hide spinner
+          activationSpinner.classList.add('hidden');
+          
           if (result.success) {
             statusMessage.textContent = 'Roles activated successfully';
 
             // Build success message
             let successMessages = [];
             if (result.results.length > 0) {
-              successMessages.push(`Successfully activated ${result.results.length} role(s)`);
+              const roleCount = result.results.filter(r => r.role).length;
+              const groupCount = result.results.filter(r => r.group).length;
+              
+              if (roleCount > 0) successMessages.push(`Successfully activated ${roleCount} role(s)`);
+              if (groupCount > 0) successMessages.push(`Successfully activated ${groupCount} group membership(s)`);
             }
             if (result.skipped && result.skipped.length > 0) {
-              successMessages.push(`${result.skipped.length} role(s) already active: ${result.skipped.map(s => s.role).join(', ')}`);
+              const skippedRoles = result.skipped.filter(s => s.role).map(s => s.role);
+              const skippedGroups = result.skipped.filter(s => s.group).map(s => s.group);
+              
+              if (skippedRoles.length > 0) {
+                successMessages.push(`${skippedRoles.length} role(s) already active`);
+              }
+              if (skippedGroups.length > 0) {
+                successMessages.push(`${skippedGroups.length} group(s) already active`);
+              }
             }
             
+            // Show success message inline
             if (successMessages.length > 0) {
-              alert(successMessages.join('\n'));
+              activationMessage.textContent = successMessages.join(' • ');
+              activationMessage.className = 'success';
+              activationMessage.classList.remove('hidden');
             }
 
             // Reset form
@@ -271,14 +307,31 @@ document.addEventListener('DOMContentLoaded', function() {
               saveObj[`${roleId}-checked`] = false;
               browser.storage.local.set(saveObj);
             });
+
+            // Refresh roles after a delay to allow API to update
+            setTimeout(() => {
+              statusMessage.textContent = 'Reloading roles...';
+              loadAllRolesUnified(false);
+            }, 2000);
           } else {
-            showError(`Failed to activate some roles: ${result.errors.map(e => `${e.role}${e.scope ? ` (${e.scope})` : ''}`).join(', ')}`);
+            const errorRoles = result.errors.filter(e => e.role).map(e => `${e.role}${e.scope ? ` (${e.scope})` : ''}`);
+            const errorGroups = result.errors.filter(e => e.group).map(e => e.group);
+            const allErrors = [...errorRoles, ...errorGroups];
+            
+            // Show error message inline
+            activationMessage.textContent = `Failed to activate: ${allErrors.join(', ')}`;
+            activationMessage.className = 'error';
+            activationMessage.classList.remove('hidden');
           }
 
           activateButton.disabled = false;
         })
         .catch(error => {
-          showError(`Activation error: ${error.message}`);
+          // Hide spinner and show error inline
+          activationSpinner.classList.add('hidden');
+          activationMessage.textContent = `Activation error: ${error.message}`;
+          activationMessage.className = 'error';
+          activationMessage.classList.remove('hidden');
           activateButton.disabled = false;
         });
       } catch (error) {
@@ -292,12 +345,19 @@ document.addEventListener('DOMContentLoaded', function() {
   function init() {
     console.log('[POPUP] init() started');
     
+    // Clear any existing timer intervals
+    activeTimerIntervals.forEach(clearInterval);
+    activeTimerIntervals = [];
+    if (refreshInterval) {
+      clearInterval(refreshInterval);
+      refreshInterval = null;
+    }
+    
     // Immediately show UI - synchronous, no callbacks
     initialLoading.classList.remove('hidden');
     noTokenView.classList.add('hidden');
     errorContainer.classList.add('hidden');
     rolesContainer.classList.add('hidden');
-    activeRolesContainer.classList.add('hidden');
     statusMessage.textContent = 'Checking token';
     
     // Check token status
@@ -310,37 +370,16 @@ document.addEventListener('DOMContentLoaded', function() {
         if (response.status.hasToken && !response.status.isExpired) {
           statusMessage.textContent = 'Loading roles';
           
-          // Show appropriate container
-          if (currentTab === 'active') {
-            activeRolesContainer.classList.remove('hidden');
-            activeRolesList.innerHTML = '<div class="loading-indicator"><div class="spinner"></div><p>Loading...</p></div>';
-            loadActiveRoles();
-          } else {
-            rolesContainer.classList.remove('hidden');
-            rolesList.innerHTML = '<div class="loading-indicator"><div class="spinner"></div><p>Loading...</p></div>';
-            
-            // Try cached first, then fresh
-            browser.runtime.sendMessage({ action: 'getCachedRoles' }, (cachedResponse) => {
-              if (cachedResponse && cachedResponse.success && cachedResponse.data) {
-                console.log('[POPUP] Got cached roles, rendering');
-                displayAllRoles(cachedResponse.data);
-                initialLoading.classList.add('hidden');
-                statusMessage.textContent = 'Roles loaded';
-              } else {
-                // No cache, load fresh
-                browser.runtime.sendMessage({ action: 'getAllRoles' }, function(rolesResponse) {
-                  if (rolesResponse && rolesResponse.success) {
-                    console.log('[POPUP] Got fresh roles, rendering');
-                    displayAllRoles(rolesResponse.data);
-                    initialLoading.classList.add('hidden');
-                    statusMessage.textContent = 'Roles loaded';
-                  } else {
-                    showError(rolesResponse?.error || 'Failed to load roles');
-                  }
-                });
-              }
-            });
-          }
+          rolesContainer.classList.remove('hidden');
+          rolesList.innerHTML = '<div class="loading-indicator"><div class="spinner"></div><p>Loading...</p></div>';
+          
+          // Load both eligible and active roles
+          loadAllRolesUnified();
+          
+          // Set up auto-refresh every 30 seconds
+          refreshInterval = setInterval(() => {
+            loadAllRolesUnified(true); // silent refresh
+          }, 30000);
         } else {
           // No valid token
           console.log('[POPUP] No valid token - showing no-token view');
@@ -352,6 +391,33 @@ document.addEventListener('DOMContentLoaded', function() {
         console.log('[POPUP] Token status check failed');
         showError(response?.error || 'Failed to check token');
       }
+    });
+  }
+  
+  // Load both eligible and active roles into unified view
+  function loadAllRolesUnified(silentRefresh = false) {
+    if (!silentRefresh) {
+      statusMessage.textContent = 'Loading roles...';
+    }
+    
+    // Fetch both eligible and active roles in parallel
+    Promise.all([
+      new Promise((resolve) => {
+        browser.runtime.sendMessage({ action: 'getAllRoles' }, (response) => {
+          resolve(response?.success ? response.data : null);
+        });
+      }),
+      new Promise((resolve) => {
+        browser.runtime.sendMessage({ action: 'getActiveRoles' }, (response) => {
+          resolve(response?.success ? response.data : null);
+        });
+      })
+    ]).then(([eligibleData, activeData]) => {
+      displayUnifiedRoles(eligibleData, activeData);
+      initialLoading.classList.add('hidden');
+      statusMessage.textContent = 'Roles loaded';
+    }).catch((error) => {
+      showError('Failed to load roles: ' + error.message);
     });
   }
   
@@ -389,66 +455,181 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   }
   
-  // Load and display PIM roles (both directory and Azure resource roles)
-  function loadRoles() {
-    // Don't modify DOM here - keep initialLoading visible until response
-    statusMessage.textContent = 'Loading roles';
+  // Display unified roles view (merged eligible and active)
+  function displayUnifiedRoles(eligibleData, activeData) {
+    // Clear existing timers
+    activeTimerIntervals.forEach(intervalId => clearInterval(intervalId));
+    activeTimerIntervals = [];
     
-    browser.runtime.sendMessage({ action: 'getAllRoles' }, function(response) {
-      if (response && response.success) {
-        displayAllRoles(response.data);
-        initialLoading.classList.add('hidden'); // Hide AFTER data is displayed
-        statusMessage.textContent = 'Roles loaded';
-        // DON'T clear keepalive - it needs to run to keep popup open
-      } else {
-        showError(response?.error || 'Failed to load roles');
-        // DON'T clear keepalive - it needs to run to keep popup open
-      }
-    });
-  }
-
-  // Load roles in background without showing loading state (for cache refresh)
-  function loadRolesInBackground() {
-    browser.runtime.sendMessage({ action: 'getAllRoles' }, function(response) {
-      if (response && response.success) {
-        displayAllRoles(response.data);
-        statusMessage.textContent = 'Roles updated';
-      }
-      // Silently fail if there's an error - we already have cached data displayed
-    });
-  }
-  
-  // Display all roles (both directory and Azure resource roles)
-  function displayAllRoles(data) {
     rolesList.innerHTML = '';
 
-    const directoryRoles = data.directoryRoles?.value || [];
-    const azureResourceRoles = data.azureResourceRoles?.value || [];
-    const errors = data.errors || [];
+    // Extract eligible roles
+    const eligibleDirectoryRoles = eligibleData?.directoryRoles?.value || [];
+    const eligibleAzureResourceRoles = eligibleData?.azureResourceRoles?.value || [];
+    const eligibleGroupRoles = eligibleData?.groupEligibilities?.value || [];
+
+    // Extract active roles
+    const activeDirectoryRoles = activeData?.activeDirectoryRoles?.value || [];
+    const activeAzureResourceRoles = activeData?.activeAzureResourceRoles?.value || [];
+    const activeGroupMemberships = activeData?.activeGroupMemberships?.value || [];
+
+    // Collect all errors
+    const errors = [
+      ...(eligibleData?.errors || []),
+      ...(activeData?.errors || [])
+    ];
 
     // Display errors if any
     if (errors.length > 0) {
-      const errorSection = document.createElement('div');
-      errorSection.className = 'warning-section';
-      errorSection.innerHTML = '<p><strong>⚠️ Some roles could not be loaded:</strong></p>';
-      errors.forEach(err => {
-        const errorMsg = document.createElement('p');
-        errorMsg.className = 'error-message';
-        errorMsg.textContent = `${err.type}: ${err.error}`;
-        errorSection.appendChild(errorMsg);
-      });
-      rolesList.appendChild(errorSection);
+      const criticalErrors = errors.filter(e => !e.warning);
+      const warnings = errors.filter(e => e.warning);
+      
+      if (criticalErrors.length > 0) {
+        const errorSection = document.createElement('div');
+        errorSection.className = 'warning-section';
+        errorSection.innerHTML = '<p><strong>⚠️ Some roles could not be loaded:</strong></p>';
+        criticalErrors.forEach(err => {
+          const errorMsg = document.createElement('p');
+          errorMsg.className = 'error-message';
+          errorMsg.textContent = `${err.type}: ${err.error}`;
+          errorSection.appendChild(errorMsg);
+        });
+        rolesList.appendChild(errorSection);
+      }
+      
+      if (warnings.length > 0) {
+        const warningSection = document.createElement('div');
+        warningSection.className = 'info-section';
+        warningSection.innerHTML = '<p><strong>ℹ️ Note:</strong></p>';
+        warnings.forEach(warn => {
+          const warnMsg = document.createElement('p');
+          warnMsg.className = 'info-message';
+          warnMsg.textContent = warn.error;
+          warningSection.appendChild(warnMsg);
+        });
+        rolesList.appendChild(warningSection);
+      }
     }
 
+    // Create lookup maps for active roles by their unique identifier
+    const activeDirectoryMap = new Map();
+    activeDirectoryRoles.forEach(role => {
+      const key = `${role.roleDefinitionId}-${role.directoryScopeId || '/'}`;
+      activeDirectoryMap.set(key, role);
+    });
+
+    const activeAzureResourceMap = new Map();
+    activeAzureResourceRoles.forEach(role => {
+      const key = `${role.properties?.roleDefinitionId}-${role.properties?.scope}`;
+      activeAzureResourceMap.set(key, role);
+    });
+
+    const activeGroupMap = new Map();
+    activeGroupMemberships.forEach(group => {
+      const key = `${group.groupId}-${group.accessId}`;
+      activeGroupMap.set(key, group);
+    });
+
+    // Build unified role list with status
+    const unifiedDirectoryRoles = [];
+    const processedDirectoryKeys = new Set();
+
+    // Add eligible directory roles with status
+    eligibleDirectoryRoles.forEach(role => {
+      const key = `${role.roleDefinitionId}-${role.directoryScopeId || '/'}`;
+      const activeRole = activeDirectoryMap.get(key);
+      processedDirectoryKeys.add(key);
+      unifiedDirectoryRoles.push({
+        ...role,
+        status: activeRole ? 'active' : 'eligible',
+        activeData: activeRole || null,
+        endDateTime: activeRole?.endDateTime || null
+      });
+    });
+
+    // Add active-only directory roles (not in eligible list)
+    activeDirectoryRoles.forEach(role => {
+      const key = `${role.roleDefinitionId}-${role.directoryScopeId || '/'}`;
+      if (!processedDirectoryKeys.has(key)) {
+        unifiedDirectoryRoles.push({
+          ...role,
+          status: 'active',
+          activeData: role,
+          endDateTime: role.endDateTime
+        });
+      }
+    });
+
+    // Build unified group list
+    const unifiedGroupRoles = [];
+    const processedGroupKeys = new Set();
+
+    eligibleGroupRoles.forEach(group => {
+      const key = `${group.groupId}-${group.accessId}`;
+      const activeGroup = activeGroupMap.get(key);
+      processedGroupKeys.add(key);
+      unifiedGroupRoles.push({
+        ...group,
+        status: activeGroup ? 'active' : 'eligible',
+        activeData: activeGroup || null,
+        endDateTime: activeGroup?.endDateTime || null
+      });
+    });
+
+    activeGroupMemberships.forEach(group => {
+      const key = `${group.groupId}-${group.accessId}`;
+      if (!processedGroupKeys.has(key)) {
+        unifiedGroupRoles.push({
+          ...group,
+          status: 'active',
+          activeData: group,
+          endDateTime: group.endDateTime
+        });
+      }
+    });
+
+    // Build unified Azure resource list
+    const unifiedAzureResourceRoles = [];
+    const processedAzureKeys = new Set();
+
+    eligibleAzureResourceRoles.forEach(role => {
+      const roleDefId = role.properties?.roleDefinitionId || role.roleDefinitionId;
+      const scope = role.properties?.scope || '';
+      const key = `${roleDefId}-${scope}`;
+      const activeRole = activeAzureResourceMap.get(key);
+      processedAzureKeys.add(key);
+      unifiedAzureResourceRoles.push({
+        ...role,
+        status: activeRole ? 'active' : 'eligible',
+        activeData: activeRole || null,
+        endDateTime: activeRole?.properties?.endDateTime || null
+      });
+    });
+
+    activeAzureResourceRoles.forEach(role => {
+      const roleDefId = role.properties?.roleDefinitionId;
+      const scope = role.properties?.scope;
+      const key = `${roleDefId}-${scope}`;
+      if (!processedAzureKeys.has(key)) {
+        unifiedAzureResourceRoles.push({
+          ...role,
+          status: 'active',
+          activeData: role,
+          endDateTime: role.properties?.endDateTime
+        });
+      }
+    });
+
     // Check if we have any roles
-    if (directoryRoles.length === 0 && azureResourceRoles.length === 0) {
-      rolesList.innerHTML += '<p class="no-roles">No eligible PIM roles found for your account.</p>';
+    const totalRoles = unifiedDirectoryRoles.length + unifiedGroupRoles.length + unifiedAzureResourceRoles.length;
+    if (totalRoles === 0) {
+      rolesList.innerHTML += '<p class="no-roles">No PIM roles found for your account.</p>';
       rolesContainer.classList.remove('hidden');
       return;
     }
 
     // Display Directory Roles section
-    if (directoryRoles.length > 0) {
+    if (unifiedDirectoryRoles.length > 0) {
       const directorySection = document.createElement('div');
       directorySection.className = 'role-section';
       const header = document.createElement('h3');
@@ -456,16 +637,33 @@ document.addEventListener('DOMContentLoaded', function() {
       header.textContent = '🔐 Entra ID Roles';
       directorySection.appendChild(header);
 
-      directoryRoles.forEach(role => {
-        const roleElement = createRoleElement(role, 'directory');
+      unifiedDirectoryRoles.forEach(role => {
+        const roleElement = createUnifiedRoleElement(role, 'directory');
         directorySection.appendChild(roleElement);
       });
 
       rolesList.appendChild(directorySection);
     }
 
+    // Display PIM Group section
+    if (unifiedGroupRoles.length > 0) {
+      const groupSection = document.createElement('div');
+      groupSection.className = 'role-section';
+      const header = document.createElement('h3');
+      header.className = 'role-section-title';
+      header.textContent = '👥 PIM Groups';
+      groupSection.appendChild(header);
+
+      unifiedGroupRoles.forEach(group => {
+        const roleElement = createUnifiedRoleElement(group, 'group');
+        groupSection.appendChild(roleElement);
+      });
+
+      rolesList.appendChild(groupSection);
+    }
+
     // Display Azure Resource Roles section
-    if (azureResourceRoles.length > 0) {
+    if (unifiedAzureResourceRoles.length > 0) {
       const azureSection = document.createElement('div');
       azureSection.className = 'role-section';
       const header = document.createElement('h3');
@@ -473,8 +671,8 @@ document.addEventListener('DOMContentLoaded', function() {
       header.textContent = '☁️ Azure Resource Roles';
       azureSection.appendChild(header);
 
-      azureResourceRoles.forEach(role => {
-        const roleElement = createRoleElement(role, 'azureResource');
+      unifiedAzureResourceRoles.forEach(role => {
+        const roleElement = createUnifiedRoleElement(role, 'azureResource');
         azureSection.appendChild(roleElement);
       });
 
@@ -482,54 +680,229 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     rolesContainer.classList.remove('hidden');
+    filterRoles(); // Apply current filters
   }
 
-  // Helper function to create a role element
-  function createRoleElement(role, roleType) {
+  // Helper function to create a unified role element (shows both eligible and active states)
+  function createUnifiedRoleElement(role, roleType) {
     const roleElement = document.createElement('div');
     roleElement.className = 'role-item compact';
+    roleElement.dataset.status = role.status;
 
-    // Store role data in dataset for later use in activation
+    if (role.status === 'active') {
+      roleElement.classList.add('active-role');
+    }
+
+    // Store role data based on type
     if (roleType === 'directory') {
       roleElement.dataset.roleDefinitionId = role.roleDefinitionId || '';
       roleElement.dataset.principalId = role.principalId || '';
       roleElement.dataset.directoryScopeId = role.directoryScopeId || '/';
       roleElement.dataset.roleType = 'directory';
+      roleElement.dataset.assignmentType = role.assignmentType || 'direct';
 
-      const roleName = role.roleName || role.roleDefinitionDisplayName ||
-                        role.roleDefinitionId || 'Unknown Role';
+      const roleName = role.roleName || role.roleDefinitionDisplayName || role.roleDefinition?.displayName || 'Unknown Role';
       const roleId = role.roleDefinitionId ? `role-${role.roleDefinitionId.replace(/[-]/g, '')}` : `role-${Math.random().toString(36).substr(2, 9)}`;
 
       const container = document.createElement('div');
       container.className = 'role-flex-container';
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.id = `${roleId}-checkbox`;
-      checkbox.className = 'role-checkbox';
+
+      // Checkbox (only for eligible roles)
+      if (role.status === 'eligible') {
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.id = `${roleId}-checkbox`;
+        checkbox.className = 'role-checkbox';
+        container.appendChild(checkbox);
+
+        // Load saved checkbox state
+        browser.storage.local.get([`${roleId}-checked`], function(result) {
+          if (result[`${roleId}-checked`]) {
+            checkbox.checked = true;
+          }
+        });
+
+        // Save checkbox state when changed
+        checkbox.addEventListener('change', function() {
+          const saveObj = {};
+          saveObj[`${roleId}-checked`] = checkbox.checked;
+          browser.storage.local.set(saveObj);
+        });
+      }
+
       const titleDiv = document.createElement('div');
-      titleDiv.className = 'role-title';
-      titleDiv.textContent = roleName;
-      container.appendChild(checkbox);
+      titleDiv.className = 'role-title-container';
+      
+      const titleText = document.createElement('div');
+      titleText.className = 'role-title';
+      titleText.textContent = roleName;
+      
+      // Assignment type badge
+      const badge = document.createElement('span');
+      badge.className = 'assignment-badge';
+      badge.textContent = role.assignmentType === 'direct' ? 'Direct' : 'Group';
+      if (role.assignmentType === 'group') {
+        badge.classList.add('assignment-badge-group');
+      }
+      
+      // Status badge
+      const statusBadge = document.createElement('span');
+      statusBadge.className = `status-badge ${role.status}`;
+      statusBadge.textContent = role.status === 'active' ? 'Active' : 'Eligible';
+
+      titleDiv.appendChild(titleText);
+      titleDiv.appendChild(badge);
+      titleDiv.appendChild(statusBadge);
+      
       container.appendChild(titleDiv);
+
+      // Add inline actions for active roles
+      if (role.status === 'active' && role.endDateTime) {
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'inline-role-actions';
+
+        const timerSpan = document.createElement('span');
+        timerSpan.className = 'inline-timer';
+        const timerId = `timer-${roleId}`;
+        timerSpan.id = timerId;
+        actionsDiv.appendChild(timerSpan);
+
+        const deactivateBtn = document.createElement('button');
+        deactivateBtn.className = 'deactivate-btn-small';
+        deactivateBtn.textContent = '✕';
+        deactivateBtn.title = 'Deactivate';
+        deactivateBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deactivateRole(role.activeData || role, roleType);
+        });
+        actionsDiv.appendChild(deactivateBtn);
+
+        container.appendChild(actionsDiv);
+
+        // Start countdown timer
+        startInlineCountdown(timerId, role.endDateTime);
+      } else if (role.status === 'active') {
+        // Active but no end time - just show deactivate button
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'inline-role-actions';
+
+        const deactivateBtn = document.createElement('button');
+        deactivateBtn.className = 'deactivate-btn-small';
+        deactivateBtn.textContent = '✕';
+        deactivateBtn.title = 'Deactivate';
+        deactivateBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deactivateRole(role.activeData || role, roleType);
+        });
+        actionsDiv.appendChild(deactivateBtn);
+
+        container.appendChild(actionsDiv);
+      }
+
       roleElement.appendChild(container);
 
-      rolesList.appendChild(roleElement);
+    } else if (roleType === 'group') {
+      roleElement.dataset.groupId = role.groupId || '';
+      roleElement.dataset.principalId = role.principalId || '';
+      roleElement.dataset.accessId = role.accessId || 'member';
+      roleElement.dataset.roleDefinitionId = role.roleDefinitionId || '';
+      roleElement.dataset.roleType = 'group';
+      roleElement.dataset.assignmentType = 'group';
 
-      // Load saved checkbox state
-      browser.storage.local.get([`${roleId}-checked`], function(result) {
-        if (result[`${roleId}-checked`]) {
-          checkbox.checked = true;
-        }
-      });
+      const groupName = role.groupName || 'Unknown Group';
+      const accessType = role.accessId === 'owner' ? 'Owner' : 'Member';
+      const groupId = role.groupId ? `group-${role.groupId.replace(/[-]/g, '')}` : `group-${Math.random().toString(36).substr(2, 9)}`;
 
-      // Save checkbox state when changed
-      checkbox.addEventListener('change', function() {
-        const saveObj = {};
-        saveObj[`${roleId}-checked`] = checkbox.checked;
-        browser.storage.local.set(saveObj);
-      });
+      const container = document.createElement('div');
+      container.className = 'role-flex-container';
+
+      // Checkbox (only for eligible)
+      if (role.status === 'eligible') {
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.id = `${groupId}-checkbox`;
+        checkbox.className = 'role-checkbox';
+        container.appendChild(checkbox);
+
+        // Load saved checkbox state
+        browser.storage.local.get([`${groupId}-checked`], function(result) {
+          if (result[`${groupId}-checked`]) {
+            checkbox.checked = true;
+          }
+        });
+
+        // Save checkbox state when changed
+        checkbox.addEventListener('change', function() {
+          const saveObj = {};
+          saveObj[`${groupId}-checked`] = checkbox.checked;
+          browser.storage.local.set(saveObj);
+        });
+      }
+
+      const titleContainer = document.createElement('div');
+      titleContainer.className = 'role-title-container';
+      
+      const titleDiv = document.createElement('div');
+      titleDiv.className = 'role-title';
+      titleDiv.textContent = groupName;
+      
+      const badge = document.createElement('span');
+      badge.className = 'assignment-badge assignment-badge-group';
+      badge.textContent = 'Group';
+      
+      const statusBadge = document.createElement('span');
+      statusBadge.className = `status-badge ${role.status}`;
+      statusBadge.textContent = role.status === 'active' ? 'Active' : 'Eligible';
+
+      titleContainer.appendChild(titleDiv);
+      titleContainer.appendChild(badge);
+      titleContainer.appendChild(statusBadge);
+      
+      container.appendChild(titleContainer);
+
+      // Add inline actions for active roles
+      if (role.status === 'active' && role.endDateTime) {
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'inline-role-actions';
+
+        const timerSpan = document.createElement('span');
+        timerSpan.className = 'inline-timer';
+        const timerId = `timer-${groupId}`;
+        timerSpan.id = timerId;
+        actionsDiv.appendChild(timerSpan);
+
+        const deactivateBtn = document.createElement('button');
+        deactivateBtn.className = 'deactivate-btn-small';
+        deactivateBtn.textContent = '✕';
+        deactivateBtn.title = 'Deactivate';
+        deactivateBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deactivateRole(role.activeData || role, roleType);
+        });
+        actionsDiv.appendChild(deactivateBtn);
+
+        container.appendChild(actionsDiv);
+        startInlineCountdown(timerId, role.endDateTime);
+      } else if (role.status === 'active') {
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'inline-role-actions';
+
+        const deactivateBtn = document.createElement('button');
+        deactivateBtn.className = 'deactivate-btn-small';
+        deactivateBtn.textContent = '✕';
+        deactivateBtn.title = 'Deactivate';
+        deactivateBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deactivateRole(role.activeData || role, roleType);
+        });
+        actionsDiv.appendChild(deactivateBtn);
+
+        container.appendChild(actionsDiv);
+      }
+
+      roleElement.appendChild(container);
+
     } else if (roleType === 'azureResource') {
-      // Azure resource roles have different structure
       const roleDefinitionId = role.properties?.roleDefinitionId || role.roleDefinitionId || '';
       const principalId = role.properties?.principalId || role.principalId || '';
       const scope = role.properties?.scope || '';
@@ -539,10 +912,9 @@ document.addEventListener('DOMContentLoaded', function() {
       roleElement.dataset.scope = scope;
       roleElement.dataset.subscriptionId = role.subscriptionId || '';
       roleElement.dataset.roleType = 'azureResource';
+      roleElement.dataset.assignmentType = role.assignmentType || 'direct';
 
-      // Get role name from expandedProperties or fallback
-      const roleName = role.properties?.expandedProperties?.roleDefinition?.displayName ||
-                        role.roleName || 'Unknown Role';
+      const roleName = role.properties?.expandedProperties?.roleDefinition?.displayName || role.roleName || 'Unknown Role';
       const subscriptionName = role.subscriptionName || 'Unknown Subscription';
       const scopeDisplay = extractScopeName(scope);
 
@@ -550,42 +922,147 @@ document.addEventListener('DOMContentLoaded', function() {
 
       const container = document.createElement('div');
       container.className = 'role-flex-container';
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.id = `${roleId}-checkbox`;
-      checkbox.className = 'role-checkbox';
+
+      // Checkbox (only for eligible)
+      if (role.status === 'eligible') {
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.id = `${roleId}-checkbox`;
+        checkbox.className = 'role-checkbox';
+        container.appendChild(checkbox);
+
+        // Load saved checkbox state
+        browser.storage.local.get([`${roleId}-checked`], function(result) {
+          if (result[`${roleId}-checked`]) {
+            checkbox.checked = true;
+          }
+        });
+
+        // Save checkbox state when changed
+        checkbox.addEventListener('change', function() {
+          const saveObj = {};
+          saveObj[`${roleId}-checked`] = checkbox.checked;
+          browser.storage.local.set(saveObj);
+        });
+      }
+
       const detailsDiv = document.createElement('div');
       detailsDiv.className = 'role-details';
+      
+      const titleContainer = document.createElement('div');
+      titleContainer.className = 'role-title-container';
+      
       const titleDiv = document.createElement('div');
       titleDiv.className = 'role-title';
       titleDiv.textContent = roleName;
+      
+      const badge = document.createElement('span');
+      badge.className = 'assignment-badge';
+      badge.textContent = role.assignmentType === 'direct' ? 'Direct' : 'Group';
+      if (role.assignmentType === 'group') {
+        badge.classList.add('assignment-badge-group');
+      }
+
+      const statusBadge = document.createElement('span');
+      statusBadge.className = `status-badge ${role.status}`;
+      statusBadge.textContent = role.status === 'active' ? 'Active' : 'Eligible';
+
+      titleContainer.appendChild(titleDiv);
+      titleContainer.appendChild(badge);
+      titleContainer.appendChild(statusBadge);
+      
       const scopeDiv = document.createElement('div');
       scopeDiv.className = 'role-scope';
       scopeDiv.textContent = subscriptionName + (scopeDisplay ? ` / ${scopeDisplay}` : '');
-      detailsDiv.appendChild(titleDiv);
+      
+      detailsDiv.appendChild(titleContainer);
       detailsDiv.appendChild(scopeDiv);
-      container.appendChild(checkbox);
       container.appendChild(detailsDiv);
+
+      // Add inline actions for active roles
+      if (role.status === 'active' && role.endDateTime) {
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'inline-role-actions';
+
+        const timerSpan = document.createElement('span');
+        timerSpan.className = 'inline-timer';
+        const timerId = `timer-${roleId}`;
+        timerSpan.id = timerId;
+        actionsDiv.appendChild(timerSpan);
+
+        const deactivateBtn = document.createElement('button');
+        deactivateBtn.className = 'deactivate-btn-small';
+        deactivateBtn.textContent = '✕';
+        deactivateBtn.title = 'Deactivate';
+        deactivateBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deactivateRole(role.activeData || role, roleType);
+        });
+        actionsDiv.appendChild(deactivateBtn);
+
+        container.appendChild(actionsDiv);
+        startInlineCountdown(timerId, role.endDateTime);
+      } else if (role.status === 'active') {
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'inline-role-actions';
+
+        const deactivateBtn = document.createElement('button');
+        deactivateBtn.className = 'deactivate-btn-small';
+        deactivateBtn.textContent = '✕';
+        deactivateBtn.title = 'Deactivate';
+        deactivateBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deactivateRole(role.activeData || role, roleType);
+        });
+        actionsDiv.appendChild(deactivateBtn);
+
+        container.appendChild(actionsDiv);
+      }
+
       roleElement.appendChild(container);
-
-      rolesList.appendChild(roleElement);
-
-      // Load saved checkbox state
-      browser.storage.local.get([`${roleId}-checked`], function(result) {
-        if (result[`${roleId}-checked`]) {
-          checkbox.checked = true;
-        }
-      });
-
-      // Save checkbox state when changed
-      checkbox.addEventListener('change', function() {
-        const saveObj = {};
-        saveObj[`${roleId}-checked`] = checkbox.checked;
-        browser.storage.local.set(saveObj);
-      });
     }
 
     return roleElement;
+  }
+
+  // Start inline countdown timer for active roles
+  function startInlineCountdown(timerId, endDateTime) {
+    const timerElement = document.getElementById(timerId);
+    if (!timerElement) return;
+
+    const endTime = new Date(endDateTime).getTime();
+
+    function updateTimer() {
+      const now = Date.now();
+      const remaining = endTime - now;
+
+      if (remaining <= 0) {
+        timerElement.textContent = 'Expired';
+        timerElement.classList.add('expired');
+        return;
+      }
+
+      const hours = Math.floor(remaining / (1000 * 60 * 60));
+      const minutes = Math.floor((remaining % (1000 * 60 * 60)) / (1000 * 60));
+      const seconds = Math.floor((remaining % (1000 * 60)) / 1000);
+
+      if (hours > 0) {
+        timerElement.textContent = `${hours}h ${minutes}m`;
+      } else if (minutes > 0) {
+        timerElement.textContent = `${minutes}m ${seconds}s`;
+      } else {
+        timerElement.textContent = `${seconds}s`;
+      }
+
+      // Add warning style if less than 15 minutes
+      if (remaining < 15 * 60 * 1000) {
+        timerElement.classList.add('expiring-soon');
+      }
+    }
+
+    updateTimer();
+    const intervalId = setInterval(updateTimer, 1000);
+    activeTimerIntervals.push(intervalId);
   }
 
   // Helper function to extract scope name from scope path
@@ -603,15 +1080,6 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     return '';
-  }
-
-  // Legacy function kept for backwards compatibility (now calls displayAllRoles)
-  function displayRoles(data) {
-    displayAllRoles({
-      directoryRoles: data,
-      azureResourceRoles: { value: [] },
-      errors: []
-    });
   }
   
   // Show an error message
@@ -644,7 +1112,26 @@ document.addEventListener('DOMContentLoaded', function() {
         const roleType = roleItem.dataset.roleType;
         const roleTitleElement = roleItem.querySelector('.role-title');
 
-        if (roleType === 'azureResource') {
+        if (roleType === 'group') {
+          // PIM group eligibility
+          const groupId = roleItem.dataset.groupId;
+          const principalId = roleItem.dataset.principalId;
+          const roleDefinitionId = roleItem.dataset.roleDefinitionId;
+          
+          // Log warning if group ID is missing
+          if (!groupId) {
+            console.warn('Warning: Selected group has no groupId:', roleTitleElement?.textContent);
+          }
+          
+          selectedRoles.push({
+            roleType: 'group',
+            groupId: groupId,
+            principalId: principalId,
+            accessId: roleItem.dataset.accessId || 'member',
+            roleDefinitionId: roleDefinitionId,
+            groupName: roleTitleElement ? roleTitleElement.textContent : 'Unknown Group'
+          });
+        } else if (roleType === 'azureResource') {
           // Azure resource role
           selectedRoles.push({
             roleType: 'azureResource',
@@ -684,6 +1171,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     allRoleItems.forEach(roleItem => {
       const roleType = roleItem.dataset.roleType;
+      const roleStatus = roleItem.dataset.status;
       const roleTitleElement = roleItem.querySelector('.role-title');
       const roleScopeElement = roleItem.querySelector('.role-scope');
 
@@ -694,8 +1182,18 @@ document.addEventListener('DOMContentLoaded', function() {
       let matchesFilter = true;
       if (currentFilter === 'directory') {
         matchesFilter = roleType === 'directory';
+      } else if (currentFilter === 'group') {
+        matchesFilter = roleType === 'group';
       } else if (currentFilter === 'azureResource') {
         matchesFilter = roleType === 'azureResource';
+      }
+
+      // Check status filter
+      let matchesStatus = true;
+      if (currentStatusFilter === 'eligible') {
+        matchesStatus = roleStatus === 'eligible';
+      } else if (currentStatusFilter === 'active') {
+        matchesStatus = roleStatus === 'active';
       }
 
       // Check search term
@@ -704,8 +1202,8 @@ document.addEventListener('DOMContentLoaded', function() {
         matchesSearch = roleName.includes(currentSearchTerm) || roleScope.includes(currentSearchTerm);
       }
 
-      // Show/hide based on both criteria
-      const shouldShow = matchesFilter && matchesSearch;
+      // Show/hide based on all criteria
+      const shouldShow = matchesFilter && matchesStatus && matchesSearch;
       roleItem.style.display = shouldShow ? '' : 'none';
 
       if (shouldShow) {
@@ -713,30 +1211,10 @@ document.addEventListener('DOMContentLoaded', function() {
       }
     });
 
-    // Show/hide role section headings based on filter
+    // Show/hide role section headings based on visible roles in each section
     allRoleSections.forEach(section => {
-      const sectionTitle = section.querySelector('.role-section-title');
-      if (sectionTitle) {
-        const titleText = sectionTitle.textContent;
-        
-        // Hide Entra ID section when Azure Resource filter is active
-        if (currentFilter === 'azureResource' && titleText.includes('Entra ID')) {
-          section.style.display = 'none';
-        }
-        // Hide Azure Resource section when Entra ID filter is active
-        else if (currentFilter === 'directory' && titleText.includes('Azure Resource')) {
-          section.style.display = 'none';
-        }
-        // Show all sections when 'all' filter is active
-        else if (currentFilter === 'all') {
-          section.style.display = '';
-        }
-        // For other cases, check if section has any visible roles
-        else {
-          const visibleRolesInSection = section.querySelectorAll('.role-item:not([style*="display: none"])');
-          section.style.display = visibleRolesInSection.length > 0 ? '' : 'none';
-        }
-      }
+      const visibleRolesInSection = section.querySelectorAll('.role-item:not([style*="display: none"])');
+      section.style.display = visibleRolesInSection.length > 0 ? '' : 'none';
     });
 
     // Update results count
@@ -748,7 +1226,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // Update search results count display
   function updateSearchResultsCount(visible, total) {
-    if (currentSearchTerm || currentFilter !== 'all') {
+    if (currentSearchTerm || currentFilter !== 'all' || currentStatusFilter !== 'all') {
       searchResultsCount.textContent = `Showing ${visible} of ${total} roles`;
       searchResultsCount.classList.remove('hidden');
     } else {
@@ -765,7 +1243,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // Add no-results message if needed
-    if (visibleCount === 0 && (currentSearchTerm || currentFilter !== 'all')) {
+    if (visibleCount === 0 && (currentSearchTerm || currentFilter !== 'all' || currentStatusFilter !== 'all')) {
       const noResultsDiv = document.createElement('div');
       noResultsDiv.className = 'no-results-message';
       noResultsDiv.innerHTML = `
@@ -777,295 +1255,16 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   }
 
-  // Switch between tabs
-  function switchTab(tabName) {
-    currentTab = tabName;
-
-    // Update tab button active states
-    tabButtons.forEach(btn => {
-      if (btn.dataset.tab === tabName) {
-        btn.classList.add('active');
-      } else {
-        btn.classList.remove('active');
-      }
-    });
-
-    // Show/hide appropriate containers
-    if (tabName === 'eligible') {
-      rolesContainer.classList.remove('hidden');
-      activeRolesContainer.classList.add('hidden');
-
-      // Stop active roles interval if running
-      if (activeRolesInterval) {
-        clearInterval(activeRolesInterval);
-        activeRolesInterval = null;
-      }
-    } else if (tabName === 'active') {
-      rolesContainer.classList.add('hidden');
-      activeRolesContainer.classList.remove('hidden');
-
-      // Show loading indicator before loading active roles
-      activeRolesList.innerHTML = `
-        <div class="loading-indicator">
-          <div class="spinner"></div>
-          <p>Loading active roles...</p>
-        </div>
-      `;
-      statusMessage.textContent = 'Loading active roles';
-
-      // Load and display active roles
-      loadActiveRoles();
-
-      // Set up interval to refresh active roles every 30 seconds
-      if (activeRolesInterval) {
-        clearInterval(activeRolesInterval);
-      }
-      activeRolesInterval = setInterval(() => {
-        // Show loading indicator before refresh
-        activeRolesList.innerHTML = `
-          <div class="loading-indicator">
-            <div class="spinner"></div>
-            <p>Refreshing active roles...</p>
-          </div>
-        `;
-        statusMessage.textContent = 'Refreshing active roles';
-        loadActiveRoles();
-      }, 30000);
-    }
-  }
-
-  function loadActiveRoles() {
-    // Don't modify DOM here - keep initialLoading visible until response
-    statusMessage.textContent = 'Loading active roles';
-    
-    browser.runtime.sendMessage({ action: 'getActiveRoles' }, function(response) {
-      if (response && response.success) {
-        displayActiveRoles(response.data);
-        initialLoading.classList.add('hidden'); // Hide AFTER data is displayed
-        statusMessage.textContent = 'Active roles loaded';
-        // DON'T clear keepalive - it needs to run to keep popup open
-      } else {
-        showError(response?.error || 'Failed to load active roles');
-        // DON'T clear keepalive - it needs to run to keep popup open
-      }
-    });
-  }
-
-  // Display active roles with countdown timers
-  function displayActiveRoles(data) {
-    activeRolesList.innerHTML = '';
-
-    const activeDirectoryRoles = data.activeDirectoryRoles?.value || [];
-    const activeAzureResourceRoles = data.activeAzureResourceRoles?.value || [];
-    const errors = data.errors || [];
-
-    // Debug logging
-    console.log('Active Directory Roles count:', activeDirectoryRoles.length);
-    console.log('Active Azure Resource Roles count:', activeAzureResourceRoles.length);
-    console.log('Active Azure Resource Roles data:', activeAzureResourceRoles);
-    console.log('Errors:', errors);
-
-    // Display errors if any
-    if (errors.length > 0) {
-      const errorSection = document.createElement('div');
-      errorSection.className = 'warning-section';
-      errorSection.innerHTML = '<p><strong>⚠️ Some active roles could not be loaded:</strong></p>';
-      errors.forEach(err => {
-        const errorMsg = document.createElement('p');
-        errorMsg.className = 'error-message';
-        errorMsg.textContent = `${err.type}: ${err.error}`;
-        errorSection.appendChild(errorMsg);
-      });
-      activeRolesList.appendChild(errorSection);
-    }
-
-    // Check if we have any active roles
-    if (activeDirectoryRoles.length === 0 && activeAzureResourceRoles.length === 0) {
-      const noActiveDiv = document.createElement('div');
-      noActiveDiv.className = 'no-active-roles';
-      const iconDiv = document.createElement('div');
-      iconDiv.className = 'icon';
-      iconDiv.textContent = '⏸️';
-      const p1 = document.createElement('p');
-      const strong = document.createElement('strong');
-      strong.textContent = 'No active roles';
-      p1.appendChild(strong);
-      const p2 = document.createElement('p');
-      p2.textContent = 'Switch to "Eligible Roles" tab to activate roles';
-      noActiveDiv.appendChild(iconDiv);
-      noActiveDiv.appendChild(p1);
-      noActiveDiv.appendChild(p2);
-      activeRolesList.appendChild(noActiveDiv);
-      return;
-    }
-
-    // Display Directory Active Roles section
-    if (activeDirectoryRoles.length > 0) {
-      const directorySection = document.createElement('div');
-      directorySection.className = 'role-section';
-      const header = document.createElement('h3');
-      header.className = 'role-section-title';
-      header.textContent = '🔐 Active Entra ID Roles';
-      directorySection.appendChild(header);
-
-      activeDirectoryRoles.forEach(role => {
-        const roleCard = createActiveRoleCard(role, 'directory');
-        directorySection.appendChild(roleCard);
-      });
-
-      activeRolesList.appendChild(directorySection);
-    }
-
-    // Display Azure Resource Active Roles section
-    if (activeAzureResourceRoles.length > 0) {
-      const azureSection = document.createElement('div');
-      azureSection.className = 'role-section';
-      const header = document.createElement('h3');
-      header.className = 'role-section-title';
-      header.textContent = '☁️ Active Azure Resource Roles';
-      azureSection.appendChild(header);
-
-      activeAzureResourceRoles.forEach(role => {
-        const roleCard = createActiveRoleCard(role, 'azureResource');
-        azureSection.appendChild(roleCard);
-      });
-
-      activeRolesList.appendChild(azureSection);
-    }
-  }
-
-  // Create an active role card with countdown timer
-  function createActiveRoleCard(role, roleType) {
-    const card = document.createElement('div');
-    card.className = 'active-role-card';
-
-    let roleName, scopeInfo, endDateTime;
-
-    if (roleType === 'directory') {
-      roleName = role.roleName || role.roleDefinition?.displayName || 'Unknown Role';
-      scopeInfo = 'Directory scope';
-      endDateTime = role.endDateTime;
-    } else if (roleType === 'azureResource') {
-      roleName = role.properties?.expandedProperties?.roleDefinition?.displayName || 'Unknown Role';
-      const subscriptionName = role.subscriptionName || 'Unknown Subscription';
-      const scopeDisplay = extractScopeName(role.properties?.scope || '');
-      scopeInfo = `${subscriptionName}${scopeDisplay ? ` / ${scopeDisplay}` : ''}`;
-      endDateTime = role.properties?.endDateTime;
-    }
-
-    if (!endDateTime) {
-      // No expiration time, just show basic info
-      const header = document.createElement('div');
-      header.className = 'active-role-header';
-      const nameDiv = document.createElement('div');
-      nameDiv.className = 'active-role-name';
-      nameDiv.textContent = roleName;
-      const badge = document.createElement('span');
-      badge.className = 'active-role-badge active';
-      badge.textContent = 'Active';
-      header.appendChild(nameDiv);
-      header.appendChild(badge);
-      
-      const infoDiv = document.createElement('div');
-      infoDiv.className = 'active-role-info';
-      infoDiv.textContent = scopeInfo;
-      
-      const actionsDiv = document.createElement('div');
-      actionsDiv.className = 'active-role-actions';
-      const deactivateBtn = document.createElement('button');
-      deactivateBtn.className = 'deactivate-btn';
-      deactivateBtn.title = 'Deactivate this role';
-      deactivateBtn.textContent = 'Deactivate';
-      actionsDiv.appendChild(deactivateBtn);
-      
-      card.appendChild(header);
-      card.appendChild(infoDiv);
-      card.appendChild(actionsDiv);
-      
-      // Add deactivate button click handler
-      deactivateBtn.addEventListener('click', () => {
-        deactivateRole(role, roleType);
-      });
-      
-      return card;
-    }
-
-    // Calculate time remaining
-    const endTime = new Date(endDateTime).getTime();
-    const now = Date.now();
-    const timeRemaining = endTime - now;
-
-    // Determine if expiring soon (less than 15 minutes)
-    const isExpiringSoon = timeRemaining < 15 * 60 * 1000;
-
-    if (isExpiringSoon) {
-      card.classList.add('expiring-soon');
-    }
-
-    // Create unique ID for this card
-    const cardId = `active-role-${Math.random().toString(36).substr(2, 9)}`;
-    card.id = cardId;
-
-    const header = document.createElement('div');
-    header.className = 'active-role-header';
-    const nameDiv = document.createElement('div');
-    nameDiv.className = 'active-role-name';
-    nameDiv.textContent = roleName;
-    const badge = document.createElement('span');
-    badge.className = `active-role-badge ${isExpiringSoon ? 'expiring' : 'active'}`;
-    badge.textContent = isExpiringSoon ? '⚠️ Expiring' : 'Active';
-    header.appendChild(nameDiv);
-    header.appendChild(badge);
-    
-    const infoDiv = document.createElement('div');
-    infoDiv.className = 'active-role-info';
-    infoDiv.textContent = scopeInfo;
-    
-    const timerDiv = document.createElement('div');
-    timerDiv.className = 'active-role-timer';
-    const progressBar = document.createElement('div');
-    progressBar.className = 'timer-progress-bar';
-    const progressFill = document.createElement('div');
-    progressFill.className = `timer-progress-fill ${isExpiringSoon ? 'expiring-soon' : ''}`;
-    progressFill.id = `${cardId}-progress`;
-    const timerText = document.createElement('div');
-    timerText.className = `timer-text-overlay ${isExpiringSoon ? 'expiring-soon' : ''}`;
-    timerText.id = `${cardId}-timer`;
-    progressBar.appendChild(progressFill);
-    progressBar.appendChild(timerText);
-    timerDiv.appendChild(progressBar);
-    
-    const actionsDiv = document.createElement('div');
-    actionsDiv.className = 'active-role-actions';
-    const deactivateBtn = document.createElement('button');
-    deactivateBtn.className = 'deactivate-btn';
-    deactivateBtn.title = 'Deactivate this role';
-    deactivateBtn.textContent = 'Deactivate';
-    actionsDiv.appendChild(deactivateBtn);
-    
-    card.appendChild(header);
-    card.appendChild(infoDiv);
-    card.appendChild(timerDiv);
-    card.appendChild(actionsDiv);
-
-    // Start countdown timer after a brief delay to ensure DOM is ready
-    setTimeout(() => {
-      updateCountdown(cardId, endTime);
-    }, 10);
-
-    // Add deactivate button click handler
-    deactivateBtn.addEventListener('click', () => {
-      deactivateRole(role, roleType);
-    });
-
-    return card;
-  }
-
   // Deactivate a role
   async function deactivateRole(role, roleType) {
-    const roleName = roleType === 'directory' 
-      ? (role.roleName || role.roleDefinition?.displayName || 'this role')
-      : (role.properties?.expandedProperties?.roleDefinition?.displayName || 'this role');
+    let roleName;
+    if (roleType === 'directory') {
+      roleName = role.roleName || role.roleDefinition?.displayName || 'this role';
+    } else if (roleType === 'group') {
+      roleName = role.groupName || 'this group';
+    } else {
+      roleName = role.properties?.expandedProperties?.roleDefinition?.displayName || 'this role';
+    }
     
     if (!confirm(`Are you sure you want to deactivate "${roleName}"?`)) {
       return;
@@ -1077,23 +1276,18 @@ document.addEventListener('DOMContentLoaded', function() {
     try {
       if (roleType === 'directory') {
         await deactivateDirectoryRole(role);
+      } else if (roleType === 'group') {
+        await deactivateGroupMembership(role);
       } else if (roleType === 'azureResource') {
         await deactivateAzureResourceRole(role);
       }
 
       statusMessage.textContent = `Successfully deactivated ${roleName}`;
       
-      // Reload active roles after a delay to allow API to update
+      // Reload roles after a delay to allow API to update
       setTimeout(() => {
-        // Show loading indicator before reloading active roles
-        activeRolesList.innerHTML = `
-          <div class="loading-indicator">
-            <div class="spinner"></div>
-            <p>Reloading active roles...</p>
-          </div>
-        `;
-        statusMessage.textContent = 'Reloading active roles';
-        loadActiveRoles();
+        statusMessage.textContent = 'Reloading roles...';
+        loadAllRolesUnified(false);
       }, 2000);
     } catch (error) {
       console.error('Deactivation error:', error);
@@ -1205,6 +1399,63 @@ document.addEventListener('DOMContentLoaded', function() {
     return await apiResponse.json();
   }
 
+  // Deactivate a PIM group membership
+  async function deactivateGroupMembership(group) {
+    const response = await browser.runtime.sendMessage({
+      action: 'getTokens'
+    });
+
+    if (!response || !response.success || !response.tokens.pimToken) {
+      throw new Error('No PIM API token available. Please visit PIM Groups in Azure Portal to capture the token.');
+    }
+
+    const token = response.tokens.pimToken;
+    const principalId = group.principalId;
+    const groupId = group.groupId;
+    const roleDefinitionId = group.roleDefinitionId || (group.accessId === 'owner' ? 'owner' : 'member');
+
+    console.log('Deactivating group membership:', { groupId, principalId, roleDefinitionId });
+
+    // Use PIM API format for deactivation (same as portal)
+    // Note: API expects 'resourceId' not 'scopedResourceId'
+    // assignmentState must be 'Active' to deactivate the active assignment (not 'Eligible' which would remove eligibility)
+    const requestBody = {
+      "assignmentState": "Active",
+      "type": "UserRemove",
+      "reason": "Self-deactivation via PIMfox",
+      "resourceId": groupId,
+      "subjectId": principalId,
+      "roleDefinitionId": roleDefinitionId
+    };
+
+    const apiResponse = await fetch(
+      'https://api.azrbac.mspim.azure.com/api/v2/privilegedAccess/aadGroups/roleAssignmentRequests',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      }
+    );
+
+    if (!apiResponse.ok) {
+      const errorData = await apiResponse.json();
+      const errorMessage = errorData.error?.message || errorData.message || `HTTP ${apiResponse.status}`;
+      
+      // Check if group membership is already deactivated
+      if (apiResponse.status === 400 && (errorMessage.includes('does not exist') || errorMessage.includes('not active'))) {
+        console.log('Group membership already deactivated');
+        return { alreadyDeactivated: true };
+      }
+      
+      throw new Error(errorMessage);
+    }
+
+    return await apiResponse.json();
+  }
+
   // Helper function to generate a GUID
   function generateGuid() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
@@ -1285,8 +1536,8 @@ window.addEventListener('error', function(e) {
 window.addEventListener('unload', function() {
   console.log('[POPUP] Unload event - cleaning up');
   // Clear any intervals
-  if (typeof activeRolesInterval !== 'undefined' && activeRolesInterval) {
-    clearInterval(activeRolesInterval);
+  if (typeof refreshInterval !== 'undefined' && refreshInterval) {
+    clearInterval(refreshInterval);
   }
 });
 

@@ -126,33 +126,6 @@ summary {
   font-weight: 500;
 }
 
-.manual-token-input {
-  margin-top: 8px;
-}
-
-textarea {
-  width: 95%;
-  padding: 8px;
-  border: 1px solid #d2d2d2;
-  border-radius: 4px;
-  margin-bottom: 8px;
-  font-family: monospace;
-  resize: vertical;
-}
-
-.btn-secondary {
-  background-color: #f3f2f1;
-  border: 1px solid #d2d2d2;
-  color: #333;
-  padding: 6px 12px;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.btn-secondary:hover {
-  background-color: #e1dfdd;
-}
-
 .token-tip {
   margin-top: 8px;
   color: #666;
@@ -167,6 +140,11 @@ textarea {
   margin-bottom: 12px;
 }
 
+.role-item.active-role {
+  border-left: 4px solid #107c10;
+  background-color: #f0fff0;
+}
+
 .role-item.compact {
   padding: 8px 12px;
   margin-bottom: 8px;
@@ -176,14 +154,63 @@ textarea {
   margin-bottom: 0;
 }
 
+.status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.status-badge.eligible {
+  background-color: #e5f0ff;
+  color: #0078d4;
+}
+
+.status-badge.active {
+  background-color: #dff6dd;
+  color: #107c10;
+}
+
 .role-title {
   font-weight: bold;
   margin-bottom: 8px;
   color: #0078d4;
 }
 
+.role-title-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.assignment-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  background-color: #e1dfdd;
+  color: #333;
+  white-space: nowrap;
+}
+
+.assignment-badge-group {
+  /* Same styling as direct - no special color */
+}
+
+.assignment-badge-small {
+  font-size: 9px;
+  padding: 1px 6px;
+}
+
 .role-details {
   font-size: 13px;
+  flex: 1;
 }
 
 .role-details div {
@@ -239,6 +266,12 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.role-flex-container .role-title-container,
+.role-flex-container .role-details {
+  flex: 1;
+  min-width: 0;
 }
 
 .role-checkbox {
@@ -331,12 +364,18 @@ a:hover {
 }
 
 .text-input {
-  width: 90%;
+  width: 100%;
   padding: 8px;
   border: 1px solid #d2d2d2;
   border-radius: 4px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   font-size: 14px;
+  box-sizing: border-box;
+}
+
+textarea.text-input {
+  resize: vertical;
+  min-height: 60px;
 }
 
 .text-input::placeholder {
@@ -390,6 +429,23 @@ a:hover {
 .warning-section .error-message {
   font-size: 12px;
   font-weight: normal;
+}
+
+.info-section {
+  background-color: #f0f6ff;
+  border-left: 4px solid #0078d4;
+  padding: 12px;
+  margin-bottom: 16px;
+  border-radius: 4px;
+}
+
+.info-section p {
+  margin: 4px 0;
+}
+
+.info-message {
+  font-size: 12px;
+  color: #333;
 }
 
 /* Search and Filter Section */
@@ -451,6 +507,11 @@ a:hover {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.filter-chips.status-filter {
+  margin-top: 8px;
 }
 
 .filter-chip {
@@ -554,11 +615,18 @@ a:hover {
   margin-bottom: 8px;
 }
 
+.active-role-name-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1;
+}
+
 .active-role-name {
   font-weight: 600;
   color: #333;
   font-size: 14px;
-  flex: 1;
 }
 
 .active-role-badge {
@@ -630,6 +698,24 @@ a:hover {
   justify-content: flex-end;
 }
 
+.inline-role-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.inline-timer {
+  font-size: 11px;
+  color: #666;
+  white-space: nowrap;
+}
+
+.inline-timer.expiring-soon {
+  color: #d83b01;
+  font-weight: 600;
+}
+
 .deactivate-btn {
   background-color: #fff;
   color: #d83b01;
@@ -655,6 +741,34 @@ a:hover {
 .deactivate-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.deactivate-btn-small {
+  background-color: transparent;
+  color: #d83b01;
+  border: 1px solid #d83b01;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+}
+
+.deactivate-btn-small:hover {
+  background-color: #d83b01;
+  color: #fff;
+}
+
+.inline-timer.expired {
+  color: #a80000;
+  font-weight: 600;
 }
 
 .timer-text-overlay.expiring-soon {
@@ -718,4 +832,52 @@ a:hover {
   font-size: 14px;
   color: #666;
   margin: 0;
+}
+
+/* Activation status styles */
+#activation-status {
+  margin-top: 12px;
+  padding: 10px;
+  border-radius: 4px;
+}
+
+.activation-spinner-container {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #0078d4;
+  font-size: 14px;
+}
+
+.spinner-small {
+  width: 20px;
+  height: 20px;
+  border: 3px solid #f3f3f3;
+  border-top: 3px solid #0078d4;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+#activation-message {
+  font-size: 14px;
+  padding: 8px 12px;
+  border-radius: 4px;
+}
+
+#activation-message.success {
+  background-color: #dff6dd;
+  color: #107c10;
+  border: 1px solid #107c10;
+}
+
+#activation-message.error {
+  background-color: #fde7e9;
+  color: #a80000;
+  border: 1px solid #a80000;
+}
+
+#activation-message.info {
+  background-color: #f0f6ff;
+  color: #0078d4;
+  border: 1px solid #0078d4;
 }
