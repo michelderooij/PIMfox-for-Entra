@@ -7,7 +7,7 @@ A Firefox extension that allows you to activate multiple PIM (Privileged Identit
 PIMfox for Entra streamlines the activation of multiple PIM roles across Microsoft Entra and Azure subscriptions. Instead of activating roles individually through each role's portal, this extension lets you select and activate multiple roles at once, saving time and reducing administrative overhead.
 
 <p align="left">
-  [assets/screenshot.png](<img src="assets/screenshot_preview.png" alt="PIMfox for Entra" width="600">)
+  <a href="assets/screenshot.png"><img src="assets/screenshot_preview.png" alt="PIMfox for Entra" width="600"></a>
 </p>
 
 It works by catching bearer tokens from requests to Microsoft Graph or Azure Management APIs. It then stores those tokens within your browser's local storage and uses them to obtain and activate your selected PIM roles.
@@ -26,7 +26,7 @@ It works by catching bearer tokens from requests to Microsoft Graph or Azure Man
 
 ### From Firefox Add-ons store 
 
-The extension is available in the [https://addons.mozilla.org/en-US/firefox/addon/pimfox-for-entra/](Firefox Add-Ons Extensions store).
+The extension is available in the [Firefox Add-Ons Extensions store](https://addons.mozilla.org/en-US/firefox/addon/pimfox-for-entra/).
 
 ### Manual Installation (testing)
 
@@ -69,6 +69,7 @@ PIMfox for Entra implements several security measures to protect your credential
 
 1.0.0   Initial release
 1.1.0   Added support for PIM Groups
+        Added success message when activating
 
 ## Privacy
 
@@ -76,7 +77,7 @@ PIMfox for Entra does not collect or transmit any personal data. All authenticat
 
 ## Credits
 
-This Firefox extension was vibe-coded referencing the [https://chromewebstore.google.com/detail/quickpim/gnhcemgacdhjljehgcnnjglhkegebikb](QuickPIM) Chrome extension by Daniel Bradley.
+This Firefox extension was vibe-coded referencing the [QuickPIM](https://chromewebstore.google.com/detail/quickpim/gnhcemgacdhjljehgcnnjglhkegebikb) Chrome extension by Daniel Bradley.
 
 ## Contributing
 
