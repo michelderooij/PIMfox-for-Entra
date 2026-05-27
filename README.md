@@ -18,9 +18,10 @@ It works by catching bearer tokens from requests to Microsoft Graph or Azure Man
 - Customizable activation duration
 - Reusing authentication when already signed (automatic token capture)
 - Inline activation status with spinner and success/error messages
-- Search and filter roles
+- Search and filter roles by type (Direct, PIM Groups, Azure Resource) and status
 - Active roles monitoring with countdown timers
 - Support for PIM-enabled groups
+- Dark mode with toggle button (follows OS preference, persisted per browser)
 
 ## Installation
 
@@ -65,11 +66,9 @@ PIMfox for Entra implements several security measures to protect your credential
 - **Memory Protection**: Decrypted tokens are only held in memory during active operations
 - **Auto-Cleanup**: Tokens can be manually cleared at any time from the extension popup
 
-## Changelog 
+## Changelog
 
-1.0.0   Initial release
-1.1.0   Added support for PIM Groups
-        Added success message when activating
+See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 ## Privacy
 

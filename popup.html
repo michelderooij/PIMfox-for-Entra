@@ -12,7 +12,10 @@
 
     <div id="status-bar">
       <span id="status-message">Loading...</span>
-      <button id="refresh-button">Refresh</button>
+      <div class="status-bar-buttons">
+        <button id="refresh-button">Refresh</button>
+        <button id="dark-mode-toggle" title="Toggle dark mode">🌙</button>
+      </div>
     </div>
     
     <div id="token-status-container">
@@ -45,7 +48,7 @@
         </div>
         <div class="filter-chips">
           <button class="filter-chip active" data-filter="all">All</button>
-          <button class="filter-chip" data-filter="directory">🔐 Entra ID</button>
+          <button class="filter-chip" data-filter="directory">👤 Direct</button>
           <button class="filter-chip" data-filter="group">👥 PIM Groups</button>
           <button class="filter-chip" data-filter="azureResource">☁️ Azure Resource</button>
         </div>
@@ -66,6 +69,8 @@
           <label for="duration-slider">Duration (hours): <span id="duration-value">1</span></label>
           <input type="range" id="duration-slider" min="0" max="8" step="0.5" value="1" class="slider">
         </div>
+
+        <div id="duration-adjust-info" class="info-message hidden"></div>
         
         <div class="control-group">
           <label for="justification-text">Justification:</label>

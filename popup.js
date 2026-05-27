@@ -9,6 +9,7 @@ document.addEventListener('DOMContentLoaded', function() {
   // Get DOM elements
   const statusMessage = document.getElementById('status-message');
   const refreshButton = document.getElementById('refresh-button');
+  const darkModeToggle = document.getElementById('dark-mode-toggle');
   const tokenStatus = document.getElementById('token-status');
   const noTokenView = document.getElementById('no-token-view');
   const rolesContainer = document.getElementById('roles-container');
@@ -46,7 +47,26 @@ document.addEventListener('DOMContentLoaded', function() {
   console.log('[POPUP] Calling init() immediately');
   init();
   console.log('[POPUP] init() has been called');
-  
+
+  // Dark mode: restore saved preference and wire up toggle
+  browser.storage.local.get('darkMode', function(result) {
+    // Use stored preference if set; otherwise fall back to browser/OS preference
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const useDark = (result.darkMode !== undefined) ? result.darkMode : prefersDark;
+    if (useDark) {
+      document.body.classList.add('dark-mode');
+      darkModeToggle.textContent = '☀️';
+      darkModeToggle.title = 'Switch to light mode';
+    }
+  });
+
+  darkModeToggle.addEventListener('click', function() {
+    const isDark = document.body.classList.toggle('dark-mode');
+    darkModeToggle.textContent = isDark ? '☀️' : '🌙';
+    darkModeToggle.title = isDark ? 'Switch to light mode' : 'Toggle dark mode';
+    browser.storage.local.set({ darkMode: isDark });
+  });
+
   // Setup event listeners
   refreshButton.addEventListener('click', init);
   
@@ -70,6 +90,42 @@ document.addEventListener('DOMContentLoaded', function() {
   durationSlider.addEventListener('input', function() {
     durationValue.textContent = durationSlider.value;
   });
+
+  // Update the slider maximum based on the lowest policy max of all checked roles
+  function updateSliderMax() {
+    const checkedBoxes = document.querySelectorAll('.role-checkbox:checked');
+    const durationAdjustInfo = document.getElementById('duration-adjust-info');
+
+    let effectiveMax;
+    if (checkedBoxes.length === 0) {
+      effectiveMax = 8;
+    } else {
+      const maxDurations = Array.from(checkedBoxes).map(cb => {
+        const roleItem = cb.closest('.role-item');
+        return parseFloat(roleItem?.dataset.maxDuration || 8);
+      });
+      effectiveMax = Math.min(Math.min(...maxDurations), 8);
+    }
+
+    const currentMax = parseFloat(durationSlider.max);
+    if (Math.abs(effectiveMax - currentMax) > 0.001) {
+      durationSlider.max = effectiveMax;
+      if (parseFloat(durationSlider.value) > effectiveMax) {
+        durationSlider.value = effectiveMax;
+        durationValue.textContent = effectiveMax % 1 === 0 ? String(effectiveMax) : effectiveMax.toFixed(1);
+      }
+    }
+
+    if (durationAdjustInfo) {
+      if (checkedBoxes.length > 0 && effectiveMax < 8) {
+        const label = effectiveMax % 1 === 0 ? String(effectiveMax) : effectiveMax.toFixed(1);
+        durationAdjustInfo.textContent = `\u2139\uFE0F Maximum duration adjusted to ${label}h based on current selection of roles, PIM groups and Azure resources.`;
+        durationAdjustInfo.classList.remove('hidden');
+      } else {
+        durationAdjustInfo.classList.add('hidden');
+      }
+    }
+  }
 
   // Search input event listener
   roleSearch.addEventListener('input', function(e) {
@@ -106,6 +162,7 @@ document.addEventListener('DOMContentLoaded', function() {
       // Update current filter
       currentFilter = this.dataset.filter;
 
+      browser.runtime.sendMessage({ action: 'invalidateRolesCache' });
       filterRoles();
     });
   });
@@ -122,6 +179,7 @@ document.addEventListener('DOMContentLoaded', function() {
       // Update current status filter
       currentStatusFilter = this.dataset.statusFilter;
 
+      browser.runtime.sendMessage({ action: 'invalidateRolesCache' });
       filterRoles();
     });
   });
@@ -473,11 +531,17 @@ document.addEventListener('DOMContentLoaded', function() {
     const activeAzureResourceRoles = activeData?.activeAzureResourceRoles?.value || [];
     const activeGroupMemberships = activeData?.activeGroupMemberships?.value || [];
 
-    // Collect all errors
-    const errors = [
+    // Collect all errors, deduplicating by message text
+    const _allErrors = [
       ...(eligibleData?.errors || []),
       ...(activeData?.errors || [])
     ];
+    const _seenErrors = new Set();
+    const errors = _allErrors.filter(e => {
+      if (_seenErrors.has(e.error)) return false;
+      _seenErrors.add(e.error);
+      return true;
+    });
 
     // Display errors if any
     if (errors.length > 0) {
@@ -634,7 +698,7 @@ document.addEventListener('DOMContentLoaded', function() {
       directorySection.className = 'role-section';
       const header = document.createElement('h3');
       header.className = 'role-section-title';
-      header.textContent = '🔐 Entra ID Roles';
+      header.textContent = '🔐 Roles';
       directorySection.appendChild(header);
 
       unifiedDirectoryRoles.forEach(role => {
@@ -700,6 +764,7 @@ document.addEventListener('DOMContentLoaded', function() {
       roleElement.dataset.directoryScopeId = role.directoryScopeId || '/';
       roleElement.dataset.roleType = 'directory';
       roleElement.dataset.assignmentType = role.assignmentType || 'direct';
+      roleElement.dataset.maxDuration = role.maxActivationDuration || 8;
 
       const roleName = role.roleName || role.roleDefinitionDisplayName || role.roleDefinition?.displayName || 'Unknown Role';
       const roleId = role.roleDefinitionId ? `role-${role.roleDefinitionId.replace(/[-]/g, '')}` : `role-${Math.random().toString(36).substr(2, 9)}`;
@@ -727,6 +792,7 @@ document.addEventListener('DOMContentLoaded', function() {
           const saveObj = {};
           saveObj[`${roleId}-checked`] = checkbox.checked;
           browser.storage.local.set(saveObj);
+          updateSliderMax();
         });
       }
 
@@ -808,6 +874,7 @@ document.addEventListener('DOMContentLoaded', function() {
       roleElement.dataset.roleDefinitionId = role.roleDefinitionId || '';
       roleElement.dataset.roleType = 'group';
       roleElement.dataset.assignmentType = 'group';
+      roleElement.dataset.maxDuration = role.maxActivationDuration || 8;
 
       const groupName = role.groupName || 'Unknown Group';
       const accessType = role.accessId === 'owner' ? 'Owner' : 'Member';
@@ -836,6 +903,7 @@ document.addEventListener('DOMContentLoaded', function() {
           const saveObj = {};
           saveObj[`${groupId}-checked`] = checkbox.checked;
           browser.storage.local.set(saveObj);
+          updateSliderMax();
         });
       }
 
@@ -913,6 +981,7 @@ document.addEventListener('DOMContentLoaded', function() {
       roleElement.dataset.subscriptionId = role.subscriptionId || '';
       roleElement.dataset.roleType = 'azureResource';
       roleElement.dataset.assignmentType = role.assignmentType || 'direct';
+      roleElement.dataset.maxDuration = role.maxActivationDuration || 8;
 
       const roleName = role.properties?.expandedProperties?.roleDefinition?.displayName || role.roleName || 'Unknown Role';
       const subscriptionName = role.subscriptionName || 'Unknown Subscription';
@@ -943,6 +1012,7 @@ document.addEventListener('DOMContentLoaded', function() {
           const saveObj = {};
           saveObj[`${roleId}-checked`] = checkbox.checked;
           browser.storage.local.set(saveObj);
+          updateSliderMax();
         });
       }
 
@@ -1179,11 +1249,14 @@ document.addEventListener('DOMContentLoaded', function() {
       const roleScope = roleScopeElement ? roleScopeElement.textContent.toLowerCase() : '';
 
       // Check filter type
+      const assignmentType = roleItem.dataset.assignmentType;
       let matchesFilter = true;
       if (currentFilter === 'directory') {
-        matchesFilter = roleType === 'directory';
+        // "Direct" shows only directory roles assigned directly (not via a group)
+        matchesFilter = roleType === 'directory' && assignmentType === 'direct';
       } else if (currentFilter === 'group') {
-        matchesFilter = roleType === 'group';
+        // "PIM Groups" shows PIM group memberships AND directory roles inherited via a group
+        matchesFilter = roleType === 'group' || (roleType === 'directory' && assignmentType === 'group');
       } else if (currentFilter === 'azureResource') {
         matchesFilter = roleType === 'azureResource';
       }

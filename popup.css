@@ -39,6 +39,12 @@ h2 {
   margin-bottom: 16px;
 }
 
+.status-bar-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 #status-message {
   font-size: 14px;
   color: #666;
@@ -55,6 +61,23 @@ h2 {
 
 #refresh-button:hover {
   background-color: #106ebe;
+}
+
+#dark-mode-toggle {
+  background: none;
+  border: 1px solid #d2d2d2;
+  border-radius: 4px;
+  padding: 5px 8px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  color: #333;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+#dark-mode-toggle:hover {
+  background-color: #f3f2f1;
+  border-color: #0078d4;
 }
 
 .info-box {
@@ -881,3 +904,136 @@ textarea.text-input {
   color: #0078d4;
   border: 1px solid #0078d4;
 }
+
+/* ── Dark mode ─────────────────────────────────────────────────────────── */
+body.dark-mode {
+  background-color: #1a1a1a;
+  color: #e8e6e3;
+}
+
+body.dark-mode h1 { color: #4cc2ff; }
+body.dark-mode h2 { color: #e8e6e3; }
+body.dark-mode a  { color: #4cc2ff; }
+body.dark-mode summary { color: #4cc2ff; }
+
+body.dark-mode #status-message { color: #aaa; }
+body.dark-mode .subheading     { color: #999; }
+body.dark-mode .token-source   { color: #999; }
+
+body.dark-mode #dark-mode-toggle {
+  border-color: #555;
+  color: #e8e6e3;
+}
+body.dark-mode #dark-mode-toggle:hover {
+  background-color: #2d2d2b;
+  border-color: #4cc2ff;
+}
+
+body.dark-mode .info-box {
+  background-color: #252525;
+  border-left-color: #555;
+  color: #e8e6e3;
+}
+body.dark-mode .info-box.success { background-color: #132313; border-left-color: #107c10; }
+body.dark-mode .info-box.warning { background-color: #2e1408; border-left-color: #d83b01; }
+body.dark-mode .info-box.notice  { background-color: #0c1d33; border-left-color: #4cc2ff; }
+
+body.dark-mode .role-item {
+  background-color: #252525;
+  border-color: #3d3d3d;
+}
+body.dark-mode .role-item.active-role {
+  background-color: #132313;
+  border-left-color: #107c10;
+}
+
+body.dark-mode .status-badge.eligible { background-color: #0c1d33; color: #4cc2ff; }
+body.dark-mode .status-badge.active   { background-color: #132313; color: #6ccb5f; }
+
+body.dark-mode .role-title       { color: #4cc2ff; }
+body.dark-mode .role-section-title { color: #e8e6e3; border-bottom-color: #4cc2ff; }
+body.dark-mode .role-scope       { color: #999; }
+body.dark-mode .assignment-badge { background-color: #3d3d3d; color: #c8c6c4; }
+
+body.dark-mode .activation-section {
+  background-color: #252525;
+  border-color: #3d3d3d;
+}
+body.dark-mode .text-input {
+  background-color: #2d2d2b;
+  border-color: #555;
+  color: #e8e6e3;
+}
+body.dark-mode .text-input::placeholder { color: #777; }
+body.dark-mode .text-input:focus { border-color: #4cc2ff; }
+
+body.dark-mode .slider { background: #3d3d3d; }
+
+body.dark-mode .search-section {
+  background-color: #252525;
+  border-color: #3d3d3d;
+}
+body.dark-mode .search-input {
+  background-color: #2d2d2b;
+  border-color: #555;
+  color: #e8e6e3;
+}
+body.dark-mode .search-input::placeholder { color: #777; }
+body.dark-mode .search-input:focus {
+  border-color: #4cc2ff;
+  background-color: #2d2d2b;
+}
+body.dark-mode .btn-clear-search { color: #aaa; }
+body.dark-mode .btn-clear-search:hover { background-color: #3d3d3b; color: #e8e6e3; }
+
+body.dark-mode .filter-chip {
+  background-color: #2d2d2b;
+  border-color: #555;
+  color: #c8c6c4;
+}
+body.dark-mode .filter-chip:hover    { background-color: #3d3d3b; border-color: #4cc2ff; }
+body.dark-mode .filter-chip.active   { background-color: #0078d4; color: #fff; border-color: #0078d4; }
+body.dark-mode .search-results-count { color: #999; }
+
+body.dark-mode .warning-section { background-color: #2e1408; border-left-color: #d83b01; }
+body.dark-mode .info-section    { background-color: #0c1d33; border-left-color: #4cc2ff; }
+body.dark-mode .info-message    { color: #aaa; }
+
+body.dark-mode .footer          { border-top-color: #3d3d3d; }
+body.dark-mode .btn-text        { color: #4cc2ff; }
+
+body.dark-mode .active-role-card {
+  background-color: #252525;
+  border-color: #3d3d3d;
+}
+body.dark-mode .active-role-card:hover      { box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
+body.dark-mode .active-role-card.expiring-soon { background-color: #2e1408; border-left-color: #d83b01; }
+body.dark-mode .active-role-name            { color: #e8e6e3; }
+body.dark-mode .active-role-info            { color: #aaa; }
+body.dark-mode .active-role-badge.active    { background-color: #132313; color: #6ccb5f; }
+body.dark-mode .active-role-badge.expiring  { background-color: #2e1408; color: #f7630c; }
+body.dark-mode .timer-progress-bar          { background-color: #3d3d3d; }
+body.dark-mode .timer-text                  { color: #e8e6e3; }
+body.dark-mode .inline-timer                { color: #aaa; }
+
+body.dark-mode .deactivate-btn {
+  background-color: #252525;
+  color: #f47560;
+  border-color: #f47560;
+}
+body.dark-mode .deactivate-btn:hover        { background-color: #d83b01; color: #fff; }
+body.dark-mode .deactivate-btn-small        { color: #f47560; border-color: #f47560; }
+body.dark-mode .deactivate-btn-small:hover  { background-color: #d83b01; color: #fff; }
+
+body.dark-mode .no-roles,
+body.dark-mode .no-active-roles,
+body.dark-mode .no-results-message,
+body.dark-mode .loading-indicator           { color: #aaa; }
+
+body.dark-mode .spinner       { border-color: #3d3d3d; border-top-color: #4cc2ff; }
+body.dark-mode .spinner-small { border-color: #3d3d3d; border-top-color: #4cc2ff; }
+
+body.dark-mode #activation-message.success { background-color: #132313; color: #6ccb5f; border-color: #107c10; }
+body.dark-mode #activation-message.error   { background-color: #2e0f0f; color: #f7630c; border-color: #a80000; }
+body.dark-mode #activation-message.info    { background-color: #0c1d33; color: #4cc2ff; border-color: #4cc2ff; }
+

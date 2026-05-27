@@ -62,6 +62,27 @@ function getUserInfo(token) {
   };
 }
 
+// Check whether a Graph token has any PIM-related scopes.
+// The Azure portal issues different tokens depending on which page is loaded.
+// A token captured from a generic portal page (e.g. /organization) may lack
+// the RoleManagement / PrivilegedAccess scopes required for PIM role queries.
+function checkTokenHasPimScopes(token) {
+  const decoded = decodeToken(token);
+  if (!decoded) return false;
+
+  // `scp` is a space-delimited list of delegated scopes granted to the token
+  const scopes = (decoded.scp || '').toLowerCase();
+  const pimKeywords = [
+    'rolemanagement',
+    'privilegedaccess',
+    'roleeligibilityschedule',
+    'roleassignmentschedule',
+    'directory.read.all',
+    'directory.readwrite.all'
+  ];
+  return pimKeywords.some(kw => scopes.includes(kw));
+}
+
 /**
  * Token Encryption Module
  * Encrypts sensitive tokens before storing in local storage
@@ -453,6 +474,11 @@ browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
       })
       .catch(error => sendResponse({ success: false, error: error.toString() }));
     return true;
+  } else if (request.action === 'invalidateRolesCache') {
+    cachedRolesData = null;
+    cachedRolesTimestamp = null;
+    sendResponse({ success: true });
+    return false;
   }
 });
 
@@ -566,7 +592,7 @@ async function getPimGroupEligibilities() {
     if (pimTokenTimestamp) {
       const tokenAgeInMinutes = (Date.now() - pimTokenTimestamp) / (1000 * 60);
       if (tokenAgeInMinutes > 45) {
-        console.warn('PIM token may have expired. Please refresh the PIM Groups page in Azure Portal.');
+        console.warn('PIM Groups token may have expired (this is separate from the main Graph token).');
         return { value: [], permissionDenied: true, tokenExpired: true };
       }
     }
@@ -697,7 +723,7 @@ async function getActiveGroupMemberships() {
     if (pimTokenTimestamp) {
       const tokenAgeInMinutes = (Date.now() - pimTokenTimestamp) / (1000 * 60);
       if (tokenAgeInMinutes > 45) {
-        console.warn('PIM token may have expired.');
+        console.warn('PIM Groups token may have expired (this is separate from the main Graph token).');
         return { value: [], permissionDenied: true, tokenExpired: true };
       }
     }
@@ -851,6 +877,14 @@ async function getPimRoles() {
         console.warn('Graph token may have expired.');
       }
     }
+
+    // Verify the token has PIM-related scopes before hitting the API.
+    // A portal token captured from a generic page (e.g. /organization) won't
+    // have RoleManagement scopes, causing a 403 on every PIM endpoint.
+    if (!checkTokenHasPimScopes(graphToken)) {
+      console.warn('Graph token lacks PIM scopes. Navigate to PIM Roles in Azure Portal.');
+      return { value: [], permissionDenied: true, insufficientScope: true };
+    }
     
     console.log('Fetching PIM directory role eligibilities using Graph API');
     
@@ -904,7 +938,7 @@ async function getPimRoles() {
           }
         },
         memberType: assignment.memberType || 'Direct',
-        assignmentType: 'direct'
+        assignmentType: (assignment.memberType === 'Group') ? 'group' : 'direct'
       }))
     };
     
@@ -1137,6 +1171,155 @@ async function getAzureResourceRoles() {
   }
 }
 
+// Helper: parse ISO 8601 duration to hours (e.g. "PT8H" → 8, "P1D" → 24, "PT30M" → 0.5)
+function parseIso8601Duration(duration) {
+  if (!duration) return 8;
+  const match = duration.match(/P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?/);
+  if (!match) return 8;
+  const days = parseInt(match[1] || 0);
+  const hours = parseInt(match[2] || 0);
+  const minutes = parseInt(match[3] || 0);
+  return days * 24 + hours + minutes / 60;
+}
+
+// Helper: extract max activation hours from a policy rules array
+// Handles both Graph API (@odata.type) and ARM API (ruleType) rule formats
+function getMaxDurationFromRules(rules) {
+  if (!rules || !Array.isArray(rules)) return null;
+  const expirationRule = rules.find(r =>
+    r['@odata.type'] === '#microsoft.graph.unifiedRoleManagementPolicyExpirationRule' ||
+    r.ruleType === 'RoleManagementPolicyExpirationRule'
+  );
+  if (!expirationRule) return null;
+  if (!expirationRule.isExpirationRequired) return null;
+  const dur = expirationRule.maximumDuration;
+  if (!dur) return null;
+  return parseIso8601Duration(dur);
+}
+
+// Fetch Entra directory role activation duration limits via policy API
+// Returns Map<roleDefinitionId, maxHours>
+async function getEntraRolePolicies() {
+  try {
+    const { graphToken: encryptedToken } = await browser.storage.local.get(['graphToken']);
+    if (!encryptedToken) return new Map();
+    const graphToken = await decryptToken(encryptedToken);
+    if (!graphToken) return new Map();
+
+    const filter = encodeURIComponent(`scopeId eq '/' and scopeType eq 'Directory'`);
+    const response = await fetch(
+      `https://graph.microsoft.com/v1.0/policies/roleManagementPolicyAssignments?$filter=${filter}&$expand=policy($expand=rules)`,
+      { headers: { 'Authorization': `Bearer ${graphToken}`, 'Content-Type': 'application/json' } }
+    );
+    if (!response.ok) return new Map();
+
+    const data = await response.json();
+    const policyMap = new Map();
+    (data.value || []).forEach(assignment => {
+      const roleDefId = assignment.roleDefinitionId;
+      const rules = assignment.policy?.rules;
+      const maxHours = getMaxDurationFromRules(rules);
+      if (roleDefId && maxHours !== null) policyMap.set(roleDefId, maxHours);
+    });
+    return policyMap;
+  } catch (error) {
+    console.warn('Failed to fetch Entra role policies:', error);
+    return new Map();
+  }
+}
+
+// Fetch group PIM role activation duration limits via policy API
+// Returns Map<groupId, maxHours>
+async function getGroupRolePolicies(groupIds) {
+  if (!groupIds || groupIds.length === 0) return new Map();
+  try {
+    const { graphToken: encryptedToken } = await browser.storage.local.get(['graphToken']);
+    if (!encryptedToken) return new Map();
+    const graphToken = await decryptToken(encryptedToken);
+    if (!graphToken) return new Map();
+
+    const policyMap = new Map();
+    for (const groupId of groupIds) {
+      try {
+        const filter = encodeURIComponent(`scopeId eq '${groupId}' and scopeType eq 'Group'`);
+        const response = await fetch(
+          `https://graph.microsoft.com/v1.0/policies/roleManagementPolicyAssignments?$filter=${filter}&$expand=policy($expand=rules)`,
+          { headers: { 'Authorization': `Bearer ${graphToken}`, 'Content-Type': 'application/json' } }
+        );
+        if (response.ok) {
+          const data = await response.json();
+          if (data.value && data.value.length > 0) {
+            const rules = data.value[0]?.policy?.rules;
+            const maxHours = getMaxDurationFromRules(rules);
+            if (maxHours !== null) policyMap.set(groupId, maxHours);
+          }
+        }
+      } catch (e) {
+        console.warn(`Failed to fetch policy for group ${groupId}:`, e);
+      }
+    }
+    return policyMap;
+  } catch (error) {
+    console.warn('Failed to fetch group role policies:', error);
+    return new Map();
+  }
+}
+
+// Fetch Azure resource role activation duration limits via ARM policy API
+// Returns Map<`${roleDefinitionId}@${subscriptionId}`, maxHours>
+async function getAzureResourceRolePolicies(subscriptionIds) {
+  if (!subscriptionIds || subscriptionIds.length === 0) return new Map();
+  try {
+    const { azureManagementToken: encryptedToken } = await browser.storage.local.get(['azureManagementToken']);
+    if (!encryptedToken) return new Map();
+    const azureToken = await decryptToken(encryptedToken);
+    if (!azureToken) return new Map();
+
+    const policyMap = new Map();
+    for (const subId of subscriptionIds) {
+      try {
+        // Fetch all policies at this subscription scope to get rules
+        const policiesResp = await fetch(
+          `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.Authorization/roleManagementPolicies?api-version=2020-10-01-preview`,
+          { headers: { 'Authorization': `Bearer ${azureToken}`, 'Content-Type': 'application/json' } }
+        );
+        // Fetch assignments to map role definitions to policies
+        const assignmentsResp = await fetch(
+          `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01-preview`,
+          { headers: { 'Authorization': `Bearer ${azureToken}`, 'Content-Type': 'application/json' } }
+        );
+        if (!policiesResp.ok || !assignmentsResp.ok) continue;
+
+        const policiesData = await policiesResp.json();
+        const assignmentsData = await assignmentsResp.json();
+
+        // Build map of policyId → maxHours from the policy rules
+        const policyRulesMap = new Map();
+        (policiesData.value || []).forEach(policy => {
+          const rules = policy.properties?.rules;
+          const maxHours = getMaxDurationFromRules(rules);
+          if (maxHours !== null) policyRulesMap.set(policy.name, maxHours);
+        });
+
+        // Join assignments to get roleDefinitionId → maxHours
+        (assignmentsData.value || []).forEach(assignment => {
+          const roleDefId = assignment.properties?.roleDefinitionId?.split('/').pop();
+          const policyName = assignment.properties?.policyId?.split('/').pop();
+          if (roleDefId && policyName && policyRulesMap.has(policyName)) {
+            policyMap.set(`${roleDefId}@${subId}`, policyRulesMap.get(policyName));
+          }
+        });
+      } catch (e) {
+        console.warn(`Failed to fetch policies for subscription ${subId}:`, e);
+      }
+    }
+    return policyMap;
+  } catch (error) {
+    console.warn('Failed to fetch Azure resource role policies:', error);
+    return new Map();
+  }
+}
+
 // Function to get all roles (both directory and Azure resource roles)
 async function getAllRoles() {
   try {
@@ -1153,10 +1336,16 @@ async function getAllRoles() {
       results.directoryRoles = directoryRoles;
       
       // Add warning if permission was denied
-      if (directoryRoles.permissionDenied) {
+      if (directoryRoles.insufficientScope) {
+        results.errors.push({
+          type: 'directory',
+          error: 'The current portal token lacks PIM permissions. Navigate to PIM \u2192 Roles in Azure Portal, then refresh PIMfox.',
+          warning: true
+        });
+      } else if (directoryRoles.permissionDenied) {
         results.errors.push({ 
           type: 'directory', 
-          error: 'Could not fetch directory roles - please browse to Azure Portal first.',
+          error: 'Could not fetch directory roles. Please navigate to PIM \u2192 Roles in Azure Portal, then refresh PIMfox.',
           warning: true
         });
       }
@@ -1183,19 +1372,19 @@ async function getAllRoles() {
       if (groupEligibilities.needsPimToken) {
         results.errors.push({ 
           type: 'groupEligibilities', 
-          error: 'PIM Groups require a separate token. Please browse to PIM > Groups in Azure Portal to capture the token.',
+          error: 'PIM Groups use a separate token from your main token. Navigate to PIM → Groups in Azure Portal to capture it.',
           warning: true
         });
       } else if (groupEligibilities.tokenExpired) {
         results.errors.push({ 
           type: 'groupEligibilities', 
-          error: 'PIM token may have expired. Please refresh the PIM Groups page in Azure Portal.',
+          error: 'PIM Groups token has expired (your main token is fine). Navigate to PIM → Groups in Azure Portal to refresh it.',
           warning: true
         });
       } else if (groupEligibilities.permissionDenied) {
         results.errors.push({ 
           type: 'groupEligibilities', 
-          error: 'Could not fetch group eligibilities - please browse to PIM > Groups in Azure Portal.',
+          error: 'Could not fetch PIM Group eligibilities. Navigate to PIM → Groups in Azure Portal.',
           warning: true
         });
       } else if (groupEligibilities.error) {
@@ -1206,14 +1395,54 @@ async function getAllRoles() {
       results.errors.push({ type: 'groupEligibilities', error: error.toString(), warning: true });
     }
 
+    // Fetch role management policies in parallel and merge maxActivationDuration
+    try {
+      // Collect unique IDs for policy lookups
+      const uniqueGroupIds = [...new Set(
+        (results.groupEligibilities.value || []).map(r => r.groupId).filter(Boolean)
+      )];
+      const uniqueSubscriptionIds = [...new Set(
+        (results.azureResourceRoles.value || []).map(r => r.subscriptionId).filter(Boolean)
+      )];
+
+      const [entraPolMap, groupPolMap, azurePolMap] = await Promise.all([
+        getEntraRolePolicies(),
+        getGroupRolePolicies(uniqueGroupIds),
+        getAzureResourceRolePolicies(uniqueSubscriptionIds)
+      ]);
+
+      // Merge maxActivationDuration into each directory role
+      (results.directoryRoles.value || []).forEach(role => {
+        const hours = entraPolMap.get(role.roleDefinitionId);
+        role.maxActivationDuration = (hours !== undefined) ? hours : 8;
+      });
+
+      // Merge maxActivationDuration into each group eligibility
+      (results.groupEligibilities.value || []).forEach(role => {
+        const hours = groupPolMap.get(role.groupId);
+        role.maxActivationDuration = (hours !== undefined) ? hours : 8;
+      });
+
+      // Merge maxActivationDuration into each Azure resource role
+      (results.azureResourceRoles.value || []).forEach(role => {
+        const key = `${role.roleDefinitionId}@${role.subscriptionId}`;
+        const hours = azurePolMap.get(key);
+        role.maxActivationDuration = (hours !== undefined) ? hours : 8;
+      });
+    } catch (policyError) {
+      console.warn('Policy fetch failed, defaulting maxActivationDuration to 8h:', policyError);
+      // Set default fallback for all roles
+      (results.directoryRoles.value || []).forEach(r => { if (!r.maxActivationDuration) r.maxActivationDuration = 8; });
+      (results.groupEligibilities.value || []).forEach(r => { if (!r.maxActivationDuration) r.maxActivationDuration = 8; });
+      (results.azureResourceRoles.value || []).forEach(r => { if (!r.maxActivationDuration) r.maxActivationDuration = 8; });
+    }
+
     return results;
   } catch (error) {
     console.error('Error getting all roles:', error);
     throw error;
   }
 }
-
-// Function to get active directory roles
 async function getActiveDirectoryRoles() {
   try {
     // Get Graph token from storage - this is all we need now
@@ -1238,6 +1467,12 @@ async function getActiveDirectoryRoles() {
       if (tokenAgeInMinutes > 45) {
         console.warn('Graph token may have expired.');
       }
+    }
+
+    // Verify the token has PIM-related scopes before hitting the API
+    if (!checkTokenHasPimScopes(graphToken)) {
+      console.warn('Graph token lacks PIM scopes. Navigate to PIM Roles in Azure Portal.');
+      return { value: [], permissionDenied: true, insufficientScope: true };
     }
 
     console.log('Fetching active directory roles using Graph API');
@@ -1302,7 +1537,7 @@ async function getActiveDirectoryRoles() {
         startDateTime: assignment.startDateTime,
         endDateTime: assignment.endDateTime,
         memberType: assignment.memberType || 'Direct',
-        assignmentType: 'direct'
+        assignmentType: (assignment.memberType === 'Group') ? 'group' : 'direct'
       }))
     };
 
@@ -1515,19 +1750,19 @@ async function getActiveRoles() {
       if (activeGroupMemberships.needsPimToken) {
         results.errors.push({ 
           type: 'activeGroupMemberships', 
-          error: 'PIM Groups require a separate token. Please browse to PIM > Groups in Azure Portal.',
+          error: 'PIM Groups use a separate token from your main token. Navigate to PIM → Groups in Azure Portal to capture it.',
           warning: true
         });
       } else if (activeGroupMemberships.tokenExpired) {
         results.errors.push({ 
           type: 'activeGroupMemberships', 
-          error: 'PIM token may have expired. Please refresh the PIM Groups page in Azure Portal.',
+          error: 'PIM Groups token has expired (your main token is fine). Navigate to PIM → Groups in Azure Portal to refresh it.',
           warning: true
         });
       } else if (activeGroupMemberships.permissionDenied) {
         results.errors.push({ 
           type: 'activeGroupMemberships', 
-          error: 'Could not fetch active group memberships - please browse to PIM > Groups in Azure Portal.',
+          error: 'Could not fetch active PIM Group memberships. Navigate to PIM → Groups in Azure Portal.',
           warning: true
         });
       } else if (activeGroupMemberships.error) {
