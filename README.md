@@ -1,7 +1,5 @@
 #  ![PIMfox shield](/assets/PIMfox32.png) PIMfox for Entra
 
-![PowerShell Gallery Downloads](https://img.shields.io/powershellgallery/dt/PIMfox-for-Entra)
-![GitHub Release](https://img.shields.io/github/v/release/michelderooij/PIMfox-for-Entra)
 ![GitHub Repo stars](https://img.shields.io/github/stars/michelderooij/PIMfox-for-Entra?style=flat-square)
 ![GitHub forks](https://img.shields.io/github/forks/michelderooij/PIMfox-for-Entra?style=flat-square)
 
