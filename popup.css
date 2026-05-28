@@ -4,7 +4,7 @@ html {
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  width: 450px;
+  width: 520px;
   height: 600px;  /* Fixed height for stable Firefox popup rendering */
   margin: 0;
   padding: 0;
@@ -161,6 +161,7 @@ summary {
   border-radius: 4px;
   padding: 12px;
   margin-bottom: 12px;
+  overflow: hidden;
 }
 
 .role-item.active-role {
@@ -224,6 +225,11 @@ summary {
 
 .assignment-badge-group {
   /* Same styling as direct - no special color */
+}
+
+.assignment-badge-resource {
+  background-color: #0078d4;
+  color: #fff;
 }
 
 .assignment-badge-small {
@@ -794,6 +800,26 @@ textarea.text-input {
   font-weight: 600;
 }
 
+/* Activation time-remaining progress bar */
+.activation-timer-bar {
+  margin: 6px -12px -12px -12px;
+  height: 4px;
+  background-color: #d0e8d0;
+  border-radius: 0 0 4px 4px;
+  overflow: hidden;
+}
+
+.activation-timer-fill {
+  height: 100%;
+  background-color: #107c10;
+  border-radius: 0 0 4px 4px;
+  transition: width 10s linear;
+}
+
+.activation-timer-fill.expiring-soon {
+  background-color: #d83b01;
+}
+
 .timer-text-overlay.expiring-soon {
   color: #ffffff;
 }
@@ -954,6 +980,7 @@ body.dark-mode .role-title       { color: #4cc2ff; }
 body.dark-mode .role-section-title { color: #e8e6e3; border-bottom-color: #4cc2ff; }
 body.dark-mode .role-scope       { color: #999; }
 body.dark-mode .assignment-badge { background-color: #3d3d3d; color: #c8c6c4; }
+body.dark-mode .assignment-badge-resource { background-color: #106ebe; color: #fff; }
 
 body.dark-mode .activation-section {
   background-color: #252525;
@@ -1013,6 +1040,9 @@ body.dark-mode .active-role-info            { color: #aaa; }
 body.dark-mode .active-role-badge.active    { background-color: #132313; color: #6ccb5f; }
 body.dark-mode .active-role-badge.expiring  { background-color: #2e1408; color: #f7630c; }
 body.dark-mode .timer-progress-bar          { background-color: #3d3d3d; }
+body.dark-mode .activation-timer-bar        { background-color: #1a3a1a; }
+body.dark-mode .activation-timer-fill       { background-color: #6ccb5f; }
+body.dark-mode .activation-timer-fill.expiring-soon { background-color: #f47560; }
 body.dark-mode .timer-text                  { color: #e8e6e3; }
 body.dark-mode .inline-timer                { color: #aaa; }
 

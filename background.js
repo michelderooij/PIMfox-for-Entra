@@ -3,7 +3,13 @@ console.log('PIMfox for Entra loaded');
 // Cache for roles data to enable instant popup display
 let cachedRolesData = null;
 let cachedRolesTimestamp = null;
-const CACHE_VALIDITY_MS = 30000; // 30 seconds
+let cachedActiveRolesData = null;
+let cachedActiveRolesTimestamp = null;
+const CACHE_VALIDITY_MS = 90000; // 90 seconds
+
+// In-flight request deduplication — prevents duplicate parallel requests
+let allRolesInFlight = null;
+let activeRolesInFlight = null;
 
 /**
  * Token Decoder Module
@@ -356,6 +362,11 @@ browser.webRequest.onSendHeaders.addListener(
             pimTokenTimestamp: Date.now(),
             pimTokenSource: details.url
           });
+          // Invalidate roles cache so the next popup open fetches fresh group data
+          cachedRolesData = null;
+          cachedRolesTimestamp = null;
+          cachedActiveRolesData = null;
+          cachedActiveRolesTimestamp = null;
           console.log('PIM API token captured and encrypted from portal!');
         }).catch(error => {
           console.error('Failed to encrypt PIM token:', error);
@@ -386,13 +397,29 @@ browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
     return true;
   } else if (request.action === "getAllRoles") {
     console.log('[BACKGROUND] getAllRoles message received');
-    getAllRoles()
+    const now = Date.now();
+    if (!request.forceRefresh && cachedRolesData && cachedRolesTimestamp && (now - cachedRolesTimestamp) < CACHE_VALIDITY_MS) {
+      console.log(`[BACKGROUND] Serving getAllRoles from cache (age: ${now - cachedRolesTimestamp}ms)`);
+      sendResponse({ success: true, data: cachedRolesData, fromCache: true });
+      return false;
+    }
+    if (!allRolesInFlight) {
+      allRolesInFlight = getAllRoles()
+        .then(data => {
+          cachedRolesData = data;
+          cachedRolesTimestamp = Date.now();
+          allRolesInFlight = null;
+          return data;
+        })
+        .catch(err => {
+          allRolesInFlight = null;
+          throw err;
+        });
+    }
+    allRolesInFlight
       .then(data => {
         console.log('[BACKGROUND] Sending getAllRoles response');
-        // Update cache when we fetch roles
-        cachedRolesData = data;
-        cachedRolesTimestamp = Date.now();
-        sendResponse({ success: true, data: data });
+        sendResponse({ success: true, data });
       })
       .catch(error => {
         console.error('[BACKGROUND] getAllRoles error:', error);
@@ -419,8 +446,27 @@ browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
     }
     return false; // Synchronous response
   } else if (request.action === "getActiveRoles") {
-    getActiveRoles()
-      .then(data => sendResponse({ success: true, data: data }))
+    const nowActive = Date.now();
+    if (!request.forceRefresh && cachedActiveRolesData && cachedActiveRolesTimestamp && (nowActive - cachedActiveRolesTimestamp) < CACHE_VALIDITY_MS) {
+      console.log(`[BACKGROUND] Serving getActiveRoles from cache (age: ${nowActive - cachedActiveRolesTimestamp}ms)`);
+      sendResponse({ success: true, data: cachedActiveRolesData, fromCache: true });
+      return false;
+    }
+    if (!activeRolesInFlight) {
+      activeRolesInFlight = getActiveRoles()
+        .then(data => {
+          cachedActiveRolesData = data;
+          cachedActiveRolesTimestamp = Date.now();
+          activeRolesInFlight = null;
+          return data;
+        })
+        .catch(err => {
+          activeRolesInFlight = null;
+          throw err;
+        });
+    }
+    activeRolesInFlight
+      .then(data => sendResponse({ success: true, data }))
       .catch(error => sendResponse({ success: false, error: error.toString() }));
     return true;
   } else if (request.action === "getTokenStatus") {
@@ -444,7 +490,13 @@ browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
     return true;
   } else if (request.action === "clearToken") {
     clearToken()
-      .then(() => sendResponse({ success: true }))
+      .then(() => {
+        cachedRolesData = null;
+        cachedRolesTimestamp = null;
+        cachedActiveRolesData = null;
+        cachedActiveRolesTimestamp = null;
+        sendResponse({ success: true });
+      })
       .catch(error => sendResponse({ success: false, error: error.toString() }));
     return true;
   } else if (request.action === "decryptToken") {
@@ -477,6 +529,8 @@ browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
   } else if (request.action === 'invalidateRolesCache') {
     cachedRolesData = null;
     cachedRolesTimestamp = null;
+    cachedActiveRolesData = null;
+    cachedActiveRolesTimestamp = null;
     sendResponse({ success: true });
     return false;
   }
@@ -1121,14 +1175,14 @@ async function getAzureResourceRoles() {
       return { value: [] }; // No subscriptions found
     }
 
-    // Fetch role eligibility for each subscription
+    // Fetch role eligibility for each subscription in parallel
     const allRoles = [];
 
-    for (const subscription of subscriptionsData.value) {
+    await Promise.all(subscriptionsData.value.map(async subscription => {
       // Validate subscription object
       if (!subscription || !subscription.subscriptionId) {
         console.warn('Skipping invalid subscription object:', subscription);
-        continue;
+        return;
       }
       
       try {
@@ -1162,7 +1216,7 @@ async function getAzureResourceRoles() {
       } catch (error) {
         console.error(`Error fetching roles for subscription ${subscription.subscriptionId}:`, error);
       }
-    }
+    }));
 
     return { value: allRoles };
   } catch (error) {
@@ -1239,7 +1293,7 @@ async function getGroupRolePolicies(groupIds) {
     if (!graphToken) return new Map();
 
     const policyMap = new Map();
-    for (const groupId of groupIds) {
+    await Promise.all(groupIds.map(async groupId => {
       try {
         const filter = encodeURIComponent(`scopeId eq '${groupId}' and scopeType eq 'Group'`);
         const response = await fetch(
@@ -1257,7 +1311,7 @@ async function getGroupRolePolicies(groupIds) {
       } catch (e) {
         console.warn(`Failed to fetch policy for group ${groupId}:`, e);
       }
-    }
+    }));
     return policyMap;
   } catch (error) {
     console.warn('Failed to fetch group role policies:', error);
@@ -1276,22 +1330,25 @@ async function getAzureResourceRolePolicies(subscriptionIds) {
     if (!azureToken) return new Map();
 
     const policyMap = new Map();
-    for (const subId of subscriptionIds) {
+    await Promise.all(subscriptionIds.map(async subId => {
       try {
-        // Fetch all policies at this subscription scope to get rules
-        const policiesResp = await fetch(
-          `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.Authorization/roleManagementPolicies?api-version=2020-10-01-preview`,
-          { headers: { 'Authorization': `Bearer ${azureToken}`, 'Content-Type': 'application/json' } }
-        );
-        // Fetch assignments to map role definitions to policies
-        const assignmentsResp = await fetch(
-          `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01-preview`,
-          { headers: { 'Authorization': `Bearer ${azureToken}`, 'Content-Type': 'application/json' } }
-        );
-        if (!policiesResp.ok || !assignmentsResp.ok) continue;
+        // Fetch policies and assignments for this subscription in parallel
+        const [policiesResp, assignmentsResp] = await Promise.all([
+          fetch(
+            `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.Authorization/roleManagementPolicies?api-version=2020-10-01-preview`,
+            { headers: { 'Authorization': `Bearer ${azureToken}`, 'Content-Type': 'application/json' } }
+          ),
+          fetch(
+            `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01-preview`,
+            { headers: { 'Authorization': `Bearer ${azureToken}`, 'Content-Type': 'application/json' } }
+          )
+        ]);
+        if (!policiesResp.ok || !assignmentsResp.ok) return;
 
-        const policiesData = await policiesResp.json();
-        const assignmentsData = await assignmentsResp.json();
+        const [policiesData, assignmentsData] = await Promise.all([
+          policiesResp.json(),
+          assignmentsResp.json()
+        ]);
 
         // Build map of policyId → maxHours from the policy rules
         const policyRulesMap = new Map();
@@ -1312,7 +1369,7 @@ async function getAzureResourceRolePolicies(subscriptionIds) {
       } catch (e) {
         console.warn(`Failed to fetch policies for subscription ${subId}:`, e);
       }
-    }
+    }));
     return policyMap;
   } catch (error) {
     console.warn('Failed to fetch Azure resource role policies:', error);
@@ -1373,7 +1430,8 @@ async function getAllRoles() {
         results.errors.push({ 
           type: 'groupEligibilities', 
           error: 'PIM Groups use a separate token from your main token. Navigate to PIM → Groups in Azure Portal to capture it.',
-          warning: true
+          warning: true,
+          needsPimToken: true
         });
       } else if (groupEligibilities.tokenExpired) {
         results.errors.push({ 
@@ -1722,36 +1780,40 @@ async function getActiveRoles() {
       errors: []
     };
 
-    // Try to get active directory roles
-    try {
-      const activeDirectoryRoles = await getActiveDirectoryRoles();
-      results.activeDirectoryRoles = activeDirectoryRoles;
-    } catch (error) {
-      console.error('Error fetching active directory roles:', error);
-      results.errors.push({ type: 'activeDirectory', error: error.toString() });
+    // Fetch all three active role types in parallel
+    const [adrSettled, aarrSettled, agmSettled] = await Promise.allSettled([
+      getActiveDirectoryRoles(),
+      getActiveAzureResourceRoles(),
+      getActiveGroupMemberships()
+    ]);
+
+    // Process active directory roles
+    if (adrSettled.status === 'fulfilled') {
+      results.activeDirectoryRoles = adrSettled.value;
+    } else {
+      console.error('Error fetching active directory roles:', adrSettled.reason);
+      results.errors.push({ type: 'activeDirectory', error: adrSettled.reason.toString() });
     }
 
-    // Try to get active Azure resource roles
-    try {
-      const activeAzureResourceRoles = await getActiveAzureResourceRoles();
-      results.activeAzureResourceRoles = activeAzureResourceRoles;
-      console.log('Active Azure Resource Roles fetched:', activeAzureResourceRoles);
-    } catch (error) {
-      console.error('Error fetching active Azure resource roles:', error);
-      results.errors.push({ type: 'activeAzureResource', error: error.toString() });
+    // Process active Azure resource roles
+    if (aarrSettled.status === 'fulfilled') {
+      results.activeAzureResourceRoles = aarrSettled.value;
+      console.log('Active Azure Resource Roles fetched:', aarrSettled.value);
+    } else {
+      console.error('Error fetching active Azure resource roles:', aarrSettled.reason);
+      results.errors.push({ type: 'activeAzureResource', error: aarrSettled.reason.toString() });
     }
 
-    // Try to get active group memberships
-    try {
-      const activeGroupMemberships = await getActiveGroupMemberships();
+    // Process active group memberships
+    if (agmSettled.status === 'fulfilled') {
+      const activeGroupMemberships = agmSettled.value;
       results.activeGroupMemberships = activeGroupMemberships;
-      
-      // Add specific warning if PIM token is needed
       if (activeGroupMemberships.needsPimToken) {
         results.errors.push({ 
           type: 'activeGroupMemberships', 
           error: 'PIM Groups use a separate token from your main token. Navigate to PIM → Groups in Azure Portal to capture it.',
-          warning: true
+          warning: true,
+          needsPimToken: true
         });
       } else if (activeGroupMemberships.tokenExpired) {
         results.errors.push({ 
@@ -1768,9 +1830,9 @@ async function getActiveRoles() {
       } else if (activeGroupMemberships.error) {
         results.errors.push({ type: 'activeGroupMemberships', error: activeGroupMemberships.error, warning: true });
       }
-    } catch (error) {
-      console.error('Error fetching active group memberships:', error);
-      results.errors.push({ type: 'activeGroupMemberships', error: error.toString(), warning: true });
+    } else {
+      console.error('Error fetching active group memberships:', agmSettled.reason);
+      results.errors.push({ type: 'activeGroupMemberships', error: agmSettled.reason.toString(), warning: true });
     }
 
     console.log('getActiveRoles returning:', results);

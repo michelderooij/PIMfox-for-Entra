@@ -68,7 +68,7 @@ document.addEventListener('DOMContentLoaded', function() {
   });
 
   // Setup event listeners
-  refreshButton.addEventListener('click', init);
+  refreshButton.addEventListener('click', () => init(true));
   
   clearTokenButton.addEventListener('click', function() {
     browser.runtime.sendMessage({ action: 'clearToken' }, function(response) {
@@ -400,7 +400,7 @@ document.addEventListener('DOMContentLoaded', function() {
   });
   
   // Main initialization function
-  function init() {
+  function init(forceRefresh = false) {
     console.log('[POPUP] init() started');
     
     // Clear any existing timer intervals
@@ -432,11 +432,11 @@ document.addEventListener('DOMContentLoaded', function() {
           rolesList.innerHTML = '<div class="loading-indicator"><div class="spinner"></div><p>Loading...</p></div>';
           
           // Load both eligible and active roles
-          loadAllRolesUnified();
+          loadAllRolesUnified(false, forceRefresh);
           
           // Set up auto-refresh every 30 seconds
           refreshInterval = setInterval(() => {
-            loadAllRolesUnified(true); // silent refresh
+            loadAllRolesUnified(true); // silent refresh, serves from cache
           }, 30000);
         } else {
           // No valid token
@@ -453,7 +453,7 @@ document.addEventListener('DOMContentLoaded', function() {
   }
   
   // Load both eligible and active roles into unified view
-  function loadAllRolesUnified(silentRefresh = false) {
+  function loadAllRolesUnified(silentRefresh = false, forceRefresh = false) {
     if (!silentRefresh) {
       statusMessage.textContent = 'Loading roles...';
     }
@@ -461,12 +461,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // Fetch both eligible and active roles in parallel
     Promise.all([
       new Promise((resolve) => {
-        browser.runtime.sendMessage({ action: 'getAllRoles' }, (response) => {
+        browser.runtime.sendMessage({ action: 'getAllRoles', forceRefresh }, (response) => {
           resolve(response?.success ? response.data : null);
         });
       }),
       new Promise((resolve) => {
-        browser.runtime.sendMessage({ action: 'getActiveRoles' }, (response) => {
+        browser.runtime.sendMessage({ action: 'getActiveRoles', forceRefresh }, (response) => {
           resolve(response?.success ? response.data : null);
         });
       })
@@ -537,9 +537,15 @@ document.addEventListener('DOMContentLoaded', function() {
       ...(activeData?.errors || [])
     ];
     const _seenErrors = new Set();
+    const hasGroupData = eligibleGroupRoles.length > 0 ||
+      activeGroupMemberships.length > 0 ||
+      eligibleDirectoryRoles.some(r => r.assignmentType === 'group') ||
+      activeDirectoryRoles.some(r => r.assignmentType === 'group');
     const errors = _allErrors.filter(e => {
       if (_seenErrors.has(e.error)) return false;
       _seenErrors.add(e.error);
+      // Suppress "needs PIM token" warnings when group data loaded successfully
+      if (hasGroupData && e.needsPimToken) return false;
       return true;
     });
 
@@ -578,7 +584,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Create lookup maps for active roles by their unique identifier
     const activeDirectoryMap = new Map();
     activeDirectoryRoles.forEach(role => {
-      const key = `${role.roleDefinitionId}-${role.directoryScopeId || '/'}`;
+      const key = `${role.roleDefinitionId}-${role.directoryScopeId || '/'}-${role.assignmentType || 'direct'}`;
       activeDirectoryMap.set(key, role);
     });
 
@@ -600,25 +606,27 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Add eligible directory roles with status
     eligibleDirectoryRoles.forEach(role => {
-      const key = `${role.roleDefinitionId}-${role.directoryScopeId || '/'}`;
+      const key = `${role.roleDefinitionId}-${role.directoryScopeId || '/'}-${role.assignmentType || 'direct'}`;
       const activeRole = activeDirectoryMap.get(key);
       processedDirectoryKeys.add(key);
       unifiedDirectoryRoles.push({
         ...role,
         status: activeRole ? 'active' : 'eligible',
         activeData: activeRole || null,
+        startDateTime: activeRole?.startDateTime || null,
         endDateTime: activeRole?.endDateTime || null
       });
     });
 
     // Add active-only directory roles (not in eligible list)
     activeDirectoryRoles.forEach(role => {
-      const key = `${role.roleDefinitionId}-${role.directoryScopeId || '/'}`;
+      const key = `${role.roleDefinitionId}-${role.directoryScopeId || '/'}-${role.assignmentType || 'direct'}`;
       if (!processedDirectoryKeys.has(key)) {
         unifiedDirectoryRoles.push({
           ...role,
           status: 'active',
           activeData: role,
+          startDateTime: role.startDateTime,
           endDateTime: role.endDateTime
         });
       }
@@ -636,6 +644,7 @@ document.addEventListener('DOMContentLoaded', function() {
         ...group,
         status: activeGroup ? 'active' : 'eligible',
         activeData: activeGroup || null,
+        startDateTime: activeGroup?.startDateTime || null,
         endDateTime: activeGroup?.endDateTime || null
       });
     });
@@ -647,6 +656,7 @@ document.addEventListener('DOMContentLoaded', function() {
           ...group,
           status: 'active',
           activeData: group,
+          startDateTime: group.startDateTime,
           endDateTime: group.endDateTime
         });
       }
@@ -666,6 +676,7 @@ document.addEventListener('DOMContentLoaded', function() {
         ...role,
         status: activeRole ? 'active' : 'eligible',
         activeData: activeRole || null,
+        startDateTime: activeRole?.properties?.startDateTime || null,
         endDateTime: activeRole?.properties?.endDateTime || null
       });
     });
@@ -679,6 +690,7 @@ document.addEventListener('DOMContentLoaded', function() {
           ...role,
           status: 'active',
           activeData: role,
+          startDateTime: role.properties?.startDateTime,
           endDateTime: role.properties?.endDateTime
         });
       }
@@ -692,56 +704,36 @@ document.addEventListener('DOMContentLoaded', function() {
       return;
     }
 
-    // Display Directory Roles section
-    if (unifiedDirectoryRoles.length > 0) {
-      const directorySection = document.createElement('div');
-      directorySection.className = 'role-section';
-      const header = document.createElement('h3');
-      header.className = 'role-section-title';
-      header.textContent = '🔐 Roles';
-      directorySection.appendChild(header);
-
-      unifiedDirectoryRoles.forEach(role => {
-        const roleElement = createUnifiedRoleElement(role, 'directory');
-        directorySection.appendChild(roleElement);
-      });
-
-      rolesList.appendChild(directorySection);
+    // Merge all roles into a single flat list: Direct → Group → Resource, then alphabetical
+    function getRoleDisplayName(role, type) {
+      if (type === 'directory') return role.roleName || role.roleDefinitionDisplayName || role.roleDefinition?.displayName || '';
+      if (type === 'group') return role.groupName || '';
+      return role.properties?.expandedProperties?.roleDefinition?.displayName || role.roleName || '';
+    }
+    function getRoleTypeSortKey(type, assignmentType) {
+      if (type === 'azureResource') return 2;
+      if (assignmentType === 'group' || type === 'group') return 1;
+      return 0; // direct
     }
 
-    // Display PIM Group section
-    if (unifiedGroupRoles.length > 0) {
-      const groupSection = document.createElement('div');
-      groupSection.className = 'role-section';
-      const header = document.createElement('h3');
-      header.className = 'role-section-title';
-      header.textContent = '👥 PIM Groups';
-      groupSection.appendChild(header);
+    const allRoles = [
+      ...unifiedDirectoryRoles.map(r => ({ role: r, type: 'directory' })),
+      ...unifiedGroupRoles.map(r => ({ role: r, type: 'group' })),
+      ...unifiedAzureResourceRoles.map(r => ({ role: r, type: 'azureResource' }))
+    ].sort((a, b) => {
+      const keyA = getRoleTypeSortKey(a.type, a.role.assignmentType);
+      const keyB = getRoleTypeSortKey(b.type, b.role.assignmentType);
+      if (keyA !== keyB) return keyA - keyB;
+      return getRoleDisplayName(a.role, a.type).localeCompare(getRoleDisplayName(b.role, b.type));
+    });
 
-      unifiedGroupRoles.forEach(group => {
-        const roleElement = createUnifiedRoleElement(group, 'group');
-        groupSection.appendChild(roleElement);
-      });
-
-      rolesList.appendChild(groupSection);
-    }
-
-    // Display Azure Resource Roles section
-    if (unifiedAzureResourceRoles.length > 0) {
-      const azureSection = document.createElement('div');
-      azureSection.className = 'role-section';
-      const header = document.createElement('h3');
-      header.className = 'role-section-title';
-      header.textContent = '☁️ Azure Resource Roles';
-      azureSection.appendChild(header);
-
-      unifiedAzureResourceRoles.forEach(role => {
-        const roleElement = createUnifiedRoleElement(role, 'azureResource');
-        azureSection.appendChild(roleElement);
-      });
-
-      rolesList.appendChild(azureSection);
-    }
+    const allRolesSection = document.createElement('div');
+    allRolesSection.className = 'role-section';
+    allRoles.forEach(({ role, type }) => {
+      const roleElement = createUnifiedRoleElement(role, type);
+      allRolesSection.appendChild(roleElement);
+    });
+    rolesList.appendChild(allRolesSection);
 
     rolesContainer.classList.remove('hidden');
     filterRoles(); // Apply current filters
@@ -866,6 +858,15 @@ document.addEventListener('DOMContentLoaded', function() {
       }
 
       roleElement.appendChild(container);
+      if (role.status === 'active' && role.startDateTime && role.endDateTime) {
+        const timerBar = document.createElement('div');
+        timerBar.className = 'activation-timer-bar';
+        const timerFill = document.createElement('div');
+        timerFill.className = 'activation-timer-fill';
+        timerBar.appendChild(timerFill);
+        roleElement.appendChild(timerBar);
+        startProgressBar(timerFill, role.startDateTime, role.endDateTime);
+      }
 
     } else if (roleType === 'group') {
       roleElement.dataset.groupId = role.groupId || '';
@@ -969,6 +970,15 @@ document.addEventListener('DOMContentLoaded', function() {
       }
 
       roleElement.appendChild(container);
+      if (role.status === 'active' && role.startDateTime && role.endDateTime) {
+        const timerBar = document.createElement('div');
+        timerBar.className = 'activation-timer-bar';
+        const timerFill = document.createElement('div');
+        timerFill.className = 'activation-timer-fill';
+        timerBar.appendChild(timerFill);
+        roleElement.appendChild(timerBar);
+        startProgressBar(timerFill, role.startDateTime, role.endDateTime);
+      }
 
     } else if (roleType === 'azureResource') {
       const roleDefinitionId = role.properties?.roleDefinitionId || role.roleDefinitionId || '';
@@ -1027,11 +1037,8 @@ document.addEventListener('DOMContentLoaded', function() {
       titleDiv.textContent = roleName;
       
       const badge = document.createElement('span');
-      badge.className = 'assignment-badge';
-      badge.textContent = role.assignmentType === 'direct' ? 'Direct' : 'Group';
-      if (role.assignmentType === 'group') {
-        badge.classList.add('assignment-badge-group');
-      }
+      badge.className = 'assignment-badge assignment-badge-resource';
+      badge.textContent = 'Resource';
 
       const statusBadge = document.createElement('span');
       statusBadge.className = `status-badge ${role.status}`;
@@ -1090,6 +1097,15 @@ document.addEventListener('DOMContentLoaded', function() {
       }
 
       roleElement.appendChild(container);
+      if (role.status === 'active' && role.startDateTime && role.endDateTime) {
+        const timerBar = document.createElement('div');
+        timerBar.className = 'activation-timer-bar';
+        const timerFill = document.createElement('div');
+        timerFill.className = 'activation-timer-fill';
+        timerBar.appendChild(timerFill);
+        roleElement.appendChild(timerBar);
+        startProgressBar(timerFill, role.startDateTime, role.endDateTime);
+      }
     }
 
     return roleElement;
@@ -1132,6 +1148,26 @@ document.addEventListener('DOMContentLoaded', function() {
 
     updateTimer();
     const intervalId = setInterval(updateTimer, 1000);
+    activeTimerIntervals.push(intervalId);
+  }
+
+  function startProgressBar(fillElement, startDateTime, endDateTime) {
+    const startTime = new Date(startDateTime).getTime();
+    const endTime = new Date(endDateTime).getTime();
+    const totalDuration = endTime - startTime;
+
+    function updateBar() {
+      const now = Date.now();
+      const remaining = Math.max(0, endTime - now);
+      const pct = totalDuration > 0 ? (remaining / totalDuration) * 100 : 0;
+      fillElement.style.width = `${pct}%`;
+      if (remaining < 15 * 60 * 1000) {
+        fillElement.classList.add('expiring-soon');
+      }
+    }
+
+    updateBar();
+    const intervalId = setInterval(updateBar, 10000);
     activeTimerIntervals.push(intervalId);
   }
 
@@ -1235,7 +1271,6 @@ document.addEventListener('DOMContentLoaded', function() {
   // Filter roles based on search term and filter type
   function filterRoles() {
     const allRoleItems = document.querySelectorAll('.role-item');
-    const allRoleSections = document.querySelectorAll('.role-section');
     let visibleCount = 0;
     let totalCount = allRoleItems.length;
 
@@ -1282,12 +1317,6 @@ document.addEventListener('DOMContentLoaded', function() {
       if (shouldShow) {
         visibleCount++;
       }
-    });
-
-    // Show/hide role section headings based on visible roles in each section
-    allRoleSections.forEach(section => {
-      const visibleRolesInSection = section.querySelectorAll('.role-item:not([style*="display: none"])');
-      section.style.display = visibleRolesInSection.length > 0 ? '' : 'none';
     });
 
     // Update results count

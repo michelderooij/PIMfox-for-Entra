@@ -19,7 +19,8 @@ It works by catching bearer tokens from requests to Microsoft Graph or Azure Man
 - Reusing authentication when already signed (automatic token capture)
 - Inline activation status with spinner and success/error messages
 - Search and filter roles by type (Direct, PIM Groups, Azure Resource) and status
-- Active roles monitoring with countdown timers
+- Unified flat role list with type badges (Direct, Group, Resource) and status badges (Eligible, Active)
+- Active roles monitoring with countdown timers and a time-remaining progress bar
 - Support for PIM-enabled groups
 - Dark mode with toggle button (follows OS preference, persisted per browser)
 
