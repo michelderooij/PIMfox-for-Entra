@@ -1,4 +1,4 @@
-# PIMfox for Entra
+#  ![PIMfox shield](/assets/PIMfox32.png) PIMfox for Entra
 
 A Firefox extension that allows you to activate multiple PIM (Privileged Identity Management) roles simultaneously in Microsoft Entra and Azure resources.
 
