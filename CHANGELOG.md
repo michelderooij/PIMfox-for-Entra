@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.2
+- Fixed: PIM Groups and Azure resource roles no longer falsely report an expired token when your session is still valid but the token was captured more than 45 minutes ago. The extension previously used the time since token capture as a proxy for expiry, which could block role loading for users with longer-lived sessions (e.g. due to Continuous Access Evaluation or extended token lifetimes configured in Entra ID).
+- Fixed: Expired tokens are now reliably detected even if they were captured very recently — the extension reads the actual expiration timestamp (`exp` claim) embedded in the token itself, rather than assuming a fixed 45-minute lifetime.
+- Fixed: If your PIM Groups token has expired, the error message now instructs you to hard-reload the Azure Portal PIM Groups page (Ctrl+Shift+R) to force a fresh token to be issued and captured, rather than just navigating to the page.
+- Improved: Token expiry detection now falls back gracefully to the 45-minute wall-clock estimate only if the token cannot be decoded — ensuring backward compatibility in edge cases.
+
 ## 1.3.1
 - All roles (Direct, Group and Resource) now use unified list, sorted by type (Direct → Group → Resource) and then alphabetically
 - Each role card shows a type badge (Direct, Group, Resource) and a status badge (Eligible, Active)

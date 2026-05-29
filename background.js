@@ -642,17 +642,22 @@ async function getPimGroupEligibilities() {
       throw new Error('Failed to decrypt PIM token.');
     }
     
-    // Check token age
-    if (pimTokenTimestamp) {
+    // Check actual JWT expiry from the token's exp claim (more accurate than wall-clock)
+    const decodedPimToken = decodeToken(pimToken);
+    if (decodedPimToken?.exp) {
+      if (decodedPimToken.exp < Math.floor(Date.now() / 1000)) {
+        return { value: [], permissionDenied: true, tokenExpired: true };
+      }
+    } else if (pimTokenTimestamp) {
+      // Fallback: wall-clock check if token cannot be decoded
       const tokenAgeInMinutes = (Date.now() - pimTokenTimestamp) / (1000 * 60);
       if (tokenAgeInMinutes > 45) {
-        console.warn('PIM Groups token may have expired (this is separate from the main Graph token).');
         return { value: [], permissionDenied: true, tokenExpired: true };
       }
     }
     
-    // Extract principalId from PIM token (or Graph token as fallback)
-    let principalId = extractPrincipalId(pimToken);
+    // Extract principalId from decoded token (reuse already-decoded result)
+    let principalId = decodedPimToken?.oid || null;
     if (!principalId && encryptedGraphToken) {
       const graphToken = await decryptToken(encryptedGraphToken);
       principalId = extractPrincipalId(graphToken);
@@ -773,17 +778,22 @@ async function getActiveGroupMemberships() {
       throw new Error('Failed to decrypt PIM token.');
     }
     
-    // Check token age
-    if (pimTokenTimestamp) {
+    // Check actual JWT expiry from the token's exp claim (more accurate than wall-clock)
+    const decodedPimToken = decodeToken(pimToken);
+    if (decodedPimToken?.exp) {
+      if (decodedPimToken.exp < Math.floor(Date.now() / 1000)) {
+        return { value: [], permissionDenied: true, tokenExpired: true };
+      }
+    } else if (pimTokenTimestamp) {
+      // Fallback: wall-clock check if token cannot be decoded
       const tokenAgeInMinutes = (Date.now() - pimTokenTimestamp) / (1000 * 60);
       if (tokenAgeInMinutes > 45) {
-        console.warn('PIM Groups token may have expired (this is separate from the main Graph token).');
         return { value: [], permissionDenied: true, tokenExpired: true };
       }
     }
     
-    // Extract principalId from PIM token (or Graph token as fallback)
-    let principalId = extractPrincipalId(pimToken);
+    // Extract principalId from decoded token (reuse already-decoded result)
+    let principalId = decodedPimToken?.oid || null;
     if (!principalId && encryptedGraphToken) {
       const graphToken = await decryptToken(encryptedGraphToken);
       principalId = extractPrincipalId(graphToken);
@@ -1093,11 +1103,17 @@ async function getTokenStatus() {
   }
   
   const tokenAgeInMinutes = (Date.now() - tokenTimestamp) / (1000 * 60);
-  
+
+  // Use JWT exp claim for accurate expiry; fall back to wall-clock if token can't be decoded
+  const decoded = decodeToken(graphToken);
+  const isExpired = decoded?.exp
+    ? decoded.exp < Math.floor(Date.now() / 1000)
+    : tokenAgeInMinutes > 45;
+
   return {
     hasToken: true,
     tokenAge: Math.round(tokenAgeInMinutes),
-    isExpired: tokenAgeInMinutes > 45,
+    isExpired,
     source: tokenSource
   };
 }
@@ -1130,13 +1146,17 @@ async function getAzureResourceRoles() {
       throw new Error('Failed to decrypt Azure Management token. Please clear tokens and re-authenticate.');
     }
 
-    // Check if token is older than 45 minutes
-    if (!azureManagementTokenTimestamp) {
-      throw new Error('Token timestamp missing. Please re-authenticate.');
-    }
-    const tokenAgeInMinutes = (Date.now() - azureManagementTokenTimestamp) / (1000 * 60);
-    if (tokenAgeInMinutes > 45) {
-      throw new Error('Token may have expired. Please refresh your Azure Portal session.');
+    // Check JWT exp claim for accurate expiry; fall back to wall-clock if token can't be decoded
+    const decodedAzureToken = decodeToken(azureManagementToken);
+    if (decodedAzureToken?.exp) {
+      if (decodedAzureToken.exp < Math.floor(Date.now() / 1000)) {
+        throw new Error('Azure Management token has expired. Please refresh your Azure Portal session.');
+      }
+    } else if (azureManagementTokenTimestamp) {
+      const tokenAgeInMinutes = (Date.now() - azureManagementTokenTimestamp) / (1000 * 60);
+      if (tokenAgeInMinutes > 45) {
+        throw new Error('Azure Management token may have expired. Please refresh your Azure Portal session.');
+      }
     }
 
     console.log('Using captured token to fetch Azure resource PIM roles');
@@ -1436,7 +1456,7 @@ async function getAllRoles() {
       } else if (groupEligibilities.tokenExpired) {
         results.errors.push({ 
           type: 'groupEligibilities', 
-          error: 'PIM Groups token has expired (your main token is fine). Navigate to PIM → Groups in Azure Portal to refresh it.',
+          error: 'PIM Groups token has expired (your main token is fine). Navigate to PIM → Groups in Azure Portal and hard-reload the page (Ctrl+Shift+R) to refresh it.',
           warning: true
         });
       } else if (groupEligibilities.permissionDenied) {
@@ -1818,7 +1838,7 @@ async function getActiveRoles() {
       } else if (activeGroupMemberships.tokenExpired) {
         results.errors.push({ 
           type: 'activeGroupMemberships', 
-          error: 'PIM Groups token has expired (your main token is fine). Navigate to PIM → Groups in Azure Portal to refresh it.',
+          error: 'PIM Groups token has expired. Navigate to PIM → Groups in Azure Portal to refresh it.',
           warning: true
         });
       } else if (activeGroupMemberships.permissionDenied) {

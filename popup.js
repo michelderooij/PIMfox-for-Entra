@@ -1,11 +1,4 @@
-// Log immediately when script loads (before DOMContentLoaded)
-console.log('[POPUP-SCRIPT] popup.js loaded at', new Date().toISOString());
-
 document.addEventListener('DOMContentLoaded', function() {
-  console.log('[POPUP] DOMContentLoaded event fired at ', new Date().toISOString());
-  console.log('[POPUP] document.readyState:', document.readyState);
-  console.log('[POPUP] body dimensions:', document.body.offsetWidth, 'x', document.body.offsetHeight);
-  
   // Get DOM elements
   const statusMessage = document.getElementById('status-message');
   const refreshButton = document.getElementById('refresh-button');
@@ -44,9 +37,7 @@ document.addEventListener('DOMContentLoaded', function() {
   let refreshInterval = null;
 
   // Initialize immediately - simple and straightforward
-  console.log('[POPUP] Calling init() immediately');
   init();
-  console.log('[POPUP] init() has been called');
 
   // Dark mode: restore saved preference and wire up toggle
   browser.storage.local.get('darkMode', function(result) {
@@ -401,8 +392,6 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // Main initialization function
   function init(forceRefresh = false) {
-    console.log('[POPUP] init() started');
-    
     // Clear any existing timer intervals
     activeTimerIntervals.forEach(clearInterval);
     activeTimerIntervals = [];
@@ -420,8 +409,6 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Check token status
     browser.runtime.sendMessage({ action: 'getTokenStatus' }, function(response) {
-      console.log('[POPUP] Token status received:', response);
-      
       if (response && response.success) {
         updateTokenStatus(response.status);
         
@@ -440,13 +427,11 @@ document.addEventListener('DOMContentLoaded', function() {
           }, 30000);
         } else {
           // No valid token
-          console.log('[POPUP] No valid token - showing no-token view');
           initialLoading.classList.add('hidden');
           noTokenView.classList.remove('hidden');
           statusMessage.textContent = 'No valid token';
         }
       } else {
-        console.log('[POPUP] Token status check failed');
         showError(response?.error || 'Failed to check token');
       }
     });
@@ -1224,11 +1209,6 @@ document.addEventListener('DOMContentLoaded', function() {
           const principalId = roleItem.dataset.principalId;
           const roleDefinitionId = roleItem.dataset.roleDefinitionId;
           
-          // Log warning if group ID is missing
-          if (!groupId) {
-            console.warn('Warning: Selected group has no groupId:', roleTitleElement?.textContent);
-          }
-          
           selectedRoles.push({
             roleType: 'group',
             groupId: groupId,
@@ -1392,7 +1372,6 @@ document.addEventListener('DOMContentLoaded', function() {
         loadAllRolesUnified(false);
       }, 2000);
     } catch (error) {
-      console.error('Deactivation error:', error);
       showError(`Failed to deactivate ${roleName}: ${error.message}`);
     }
   }
@@ -1438,7 +1417,6 @@ document.addEventListener('DOMContentLoaded', function() {
       // Check if role is already deactivated
       if (apiResponse.status === 400 && errorMessage.includes('does not exist')) {
         // Role was already deactivated - this is fine, just refresh the list
-        console.log('Role assignment already deactivated');
         return { alreadyDeactivated: true };
       }
       
@@ -1491,7 +1469,6 @@ document.addEventListener('DOMContentLoaded', function() {
       // Check if role is already deactivated
       if (apiResponse.status === 400 && errorMessage.includes('does not exist')) {
         // Role was already deactivated - this is fine, just refresh the list
-        console.log('Azure resource role assignment already deactivated');
         return { alreadyDeactivated: true };
       }
       
@@ -1515,8 +1492,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const principalId = group.principalId;
     const groupId = group.groupId;
     const roleDefinitionId = group.roleDefinitionId || (group.accessId === 'owner' ? 'owner' : 'member');
-
-    console.log('Deactivating group membership:', { groupId, principalId, roleDefinitionId });
 
     // Use PIM API format for deactivation (same as portal)
     // Note: API expects 'resourceId' not 'scopedResourceId'
@@ -1548,7 +1523,6 @@ document.addEventListener('DOMContentLoaded', function() {
       
       // Check if group membership is already deactivated
       if (apiResponse.status === 400 && (errorMessage.includes('does not exist') || errorMessage.includes('not active'))) {
-        console.log('Group membership already deactivated');
         return { alreadyDeactivated: true };
       }
       
@@ -1567,83 +1541,4 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
 
-  // Update countdown timer for a role card
-  function updateCountdown(cardId, endTime) {
-    const timerElement = document.getElementById(`${cardId}-timer`);
-    const progressElement = document.getElementById(`${cardId}-progress`);
-
-    if (!timerElement || !progressElement) return;
-
-    const updateTimer = () => {
-      const now = Date.now();
-      const timeRemaining = endTime - now;
-
-      if (timeRemaining <= 0) {
-        timerElement.textContent = 'Expired';
-        progressElement.style.width = '0%';
-        return;
-      }
-
-      // Calculate hours, minutes, seconds
-      const hours = Math.floor(timeRemaining / (1000 * 60 * 60));
-      const minutes = Math.floor((timeRemaining % (1000 * 60 * 60)) / (1000 * 60));
-      const seconds = Math.floor((timeRemaining % (1000 * 60)) / 1000);
-
-      // Format time string
-      let timeString = '';
-      if (hours > 0) {
-        timeString = `${hours}h ${minutes}m`;
-      } else if (minutes > 0) {
-        timeString = `${minutes}m ${seconds}s`;
-      } else {
-        timeString = `${seconds}s`;
-      }
-
-      timerElement.textContent = timeString;
-
-      // Update progress bar (assume 8 hour max duration for calculation)
-      const maxDuration = 8 * 60 * 60 * 1000; // 8 hours in milliseconds
-      const percentRemaining = Math.max(0, Math.min(100, (timeRemaining / maxDuration) * 100));
-      progressElement.style.width = `${percentRemaining}%`;
-    };
-
-    // Initial update
-    updateTimer();
-
-    // Update every second
-    const interval = setInterval(() => {
-      updateTimer();
-
-      // Stop if timer expired or card no longer exists
-      if (!document.getElementById(cardId)) {
-        clearInterval(interval);
-      }
-    }, 1000);
-  }
-  
-  console.log('[POPUP] DOMContentLoaded event handler completed');
-});
-
-// Also log window load event
-window.addEventListener('load', function() {
-  console.log('[POPUP] window load event fired');
-});
-
-// Log any errors
-window.addEventListener('error', function(e) {
-  console.error('[POPUP] Window error:', e.message, e.filename, e.lineno, e.colno);
-});
-
-// Force cleanup on unload
-window.addEventListener('unload', function() {
-  console.log('[POPUP] Unload event - cleaning up');
-  // Clear any intervals
-  if (typeof refreshInterval !== 'undefined' && refreshInterval) {
-    clearInterval(refreshInterval);
-  }
-});
-
-// Log when popup becomes visible/hidden
-document.addEventListener('visibilitychange', function() {
-  console.log('[POPUP] Visibility changed:', document.visibilityState);
 });
