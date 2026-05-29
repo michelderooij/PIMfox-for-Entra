@@ -1,5 +1,8 @@
 #  ![PIMfox shield](/assets/PIMfox32.png) PIMfox for Entra
 
+![GitHub Repo stars](https://img.shields.io/github/stars/michelderooij/PIMfox-for-Entra?style=flat-square)
+![GitHub forks](https://img.shields.io/github/forks/michelderooij/PIMfox-for-Entra?style=flat-square)
+
 A Firefox extension that allows you to activate multiple PIM (Privileged Identity Management) roles simultaneously in Microsoft Entra and Azure resources.
 
 ## Overview
