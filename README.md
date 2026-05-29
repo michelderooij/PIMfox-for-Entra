@@ -112,6 +112,49 @@ The `webRequest` and `webRequestBlocking` permissions are the most sensitive one
 
 The `tabs` permission is also noteworthy: Firefox grants access to all tab metadata (URL, title, container ID) when this permission is declared, not just the active tab. PIMfox only reads the `cookieStoreId` of the tab that triggered a webRequest event or the currently active popup tab — no other tab data is accessed.
 
+## FAQ
+
+**Why do I need to visit the Azure or Entra portal before the extension works?**
+
+PIMfox has no login screen of its own and never asks for your password. It works by passively intercepting the authentication traffic your browser already produces while you use the Microsoft portals. When you visit the Entra or Azure portal, the portal's own JavaScript application authenticates with Microsoft and attaches a short-lived signed access token (a *bearer token*) to every API request it sends. PIMfox's background script inspects those outgoing request headers, extracts the token, and stores an encrypted copy in your browser's local storage. From that point on, PIMfox can call the same Microsoft APIs on your behalf using that token, without you entering any credentials into the extension.
+
+Tokens are short-lived (typically 60–90 minutes) and only exist in your browser while the portal is actively making requests. If you have not yet opened a portal, or all previously captured tokens have expired, there is nothing for PIMfox to work with. A brief visit to the relevant portal — even just navigating to the home page — is enough to trigger a fresh token to be issued and captured.
+
+**Why can't the extension use the token from one portal to obtain tokens for the other portals?**
+
+Every bearer token is cryptographically bound to a specific API audience. A token issued for Microsoft Graph (`graph.microsoft.com`) carries an `aud` claim that locks it to that endpoint; if you present it to the Azure Management API (`management.azure.com`), Microsoft will reject it with a 401 error — the audience doesn't match. The reverse is equally true.
+
+Obtaining a token for a *different* audience requires initiating a new OAuth authorization request and asking Microsoft for a token scoped to that other resource. Only the portal web applications can do this transparently, because they are registered Microsoft Entra application identities with trusted credentials and the user's existing session. PIMfox is not a registered Entra application — it holds no client credentials and cannot initiate OAuth flows on its own. It can only capture tokens that the portals produce as a side effect of normal browsing.
+
+This means each portal provides exactly one token, valid for exactly its own API:
+- **Microsoft Entra portal** → Graph token (Entra ID roles + PIM Groups)
+- **Azure portal** → Azure Management token (Azure resource roles)
+
+If you only need Entra roles and PIM Groups, visiting the Entra portal once is sufficient. If you also manage Azure resource roles, you need to visit the Azure portal as well.
+
+**What notices can appear and what do they mean?**
+
+PIMfox displays inline notices at the top of the role list when it cannot fully load your roles. These are warnings, not hard errors — whatever data was successfully retrieved is still shown below them.
+
+| Notice | Meaning |
+|---|---|
+| *"The current portal token lacks PIM permissions. Navigate to PIM → Roles in Azure Portal, then refresh PIMfox."* | A Graph token was captured, but it was obtained from a portal page that did not request PIM scopes. Navigate specifically to the PIM blade so the portal requests a token with the required permissions. |
+| *"Could not fetch directory roles. Please navigate to PIM → Roles in Azure Portal, then refresh PIMfox."* | The Graph token is present but the API returned a permission denied response for directory role listings. Visiting the PIM → Roles page forces the portal to acquire a token with the correct scope. |
+| *"Your Graph API token has expired. Please hard-reload (Ctrl+Shift+R) the Entra portal page to refresh it."* | The stored Graph token has passed its expiry time. A hard reload forces the portal to acquire a completely fresh token, which PIMfox will capture automatically. |
+| *"Could not fetch PIM Group eligibilities / active PIM Group memberships. Please visit Microsoft Entra portal and sign in."* | No Graph token has been captured yet, or it was cleared. Visit the Entra portal and browse briefly to trigger token capture. |
+
+**Why are my roles not showing?**
+
+Several things can cause roles to be absent or partially visible:
+
+- **No token captured yet** — you have not visited the relevant portal since installing the extension or since the last token was cleared. Visit the Entra portal (for Entra ID roles and PIM Groups) and/or the Azure portal (for Azure resource roles) to trigger capture.
+- **Token expired** — tokens are valid for roughly 60–90 minutes. If the popup shows an expiry warning, hard-reload the portal page (`Ctrl+Shift+R`) and re-open PIMfox.
+- **Insufficient token scope** — the token was captured from a page that did not request PIM permissions. Navigate specifically to the PIM section of the Entra portal, then refresh PIMfox.
+- **Active filter or search** — the type filter chips (Direct, PIM Groups, Azure Resource) or status filter (Eligible, Active) may be narrowing the list. Check that "All" is selected, and clear any search text.
+- **No eligible roles assigned** — your account may genuinely have no PIM-eligible assignments. Confirm in the Entra portal under PIM → My roles.
+- **Azure resource roles missing** — these require a separate Azure Management token, obtained by visiting the Azure portal. If you have only visited the Entra portal, Azure resource roles will not appear.
+- **Role activation is still propagating** — after activating a role, it can take a few seconds to a minute for the API to reflect the active state. Use the refresh button if a recently activated role is not yet showing as active.
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full version history.
