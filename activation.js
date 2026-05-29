@@ -270,9 +270,9 @@ function generateGuid() {
 }
 
 // Function to activate PIM group memberships using PIM API
-async function activateGroupMemberships(selectedGroups, durationHours, justification, pimToken, ticketInfo = {}) {
-  if (!pimToken) {
-    throw new Error('No PIM API token available. Please browse to PIM > Groups in Azure Portal to capture the token.');
+async function activateGroupMemberships(selectedGroups, durationHours, justification, graphToken, ticketInfo = {}) {
+  if (!graphToken) {
+    throw new Error('No Graph API token available. Please visit Microsoft Entra portal to sign in.');
   }
 
   if (!selectedGroups || selectedGroups.length === 0) {
@@ -288,7 +288,7 @@ async function activateGroupMemberships(selectedGroups, durationHours, justifica
   }
 
   // Convert duration from hours to ISO 8601 duration format
-  const isoDuration = `PT${Math.round(durationHours * 60)}M`; // Convert to minutes for more precision
+  const isoDuration = `PT${Math.round(durationHours * 60)}M`;
 
   // Process each group activation request
   const results = [];
@@ -307,7 +307,7 @@ async function activateGroupMemberships(selectedGroups, durationHours, justifica
         });
         continue;
       }
-      
+
       if (!group.principalId) {
         console.error('Group activation error: Missing principalId for group:', group);
         errors.push({
@@ -317,50 +317,38 @@ async function activateGroupMemberships(selectedGroups, durationHours, justifica
         });
         continue;
       }
-      
-      if (!group.roleDefinitionId && !group.assignmentId) {
-        console.error('Group activation error: Missing roleDefinitionId for group:', group);
-        errors.push({
-          group: group.groupName || group.groupId,
-          success: false,
-          error: 'Missing role definition ID - please refresh and try again'
-        });
-        continue;
-      }
-      
-      // Prepare request body for PIM API (api.azrbac.mspim.azure.com)
+
+      // Prepare request body for Graph API
       const requestBody = {
-        "roleDefinitionId": group.roleDefinitionId,
-        "resourceId": group.groupId,
-        "subjectId": group.principalId,
-        "assignmentState": "Active",
-        "type": "UserAdd",
-        "reason": justification,
-        "schedule": {
-          "type": "Once",
+        "action": "selfActivate",
+        "accessId": group.accessId || "member",
+        "principalId": group.principalId,
+        "groupId": group.groupId,
+        "justification": justification,
+        "scheduleInfo": {
           "startDateTime": new Date().toISOString(),
-          "duration": isoDuration
+          "expiration": {
+            "type": "afterDuration",
+            "duration": isoDuration
+          }
         }
       };
-      
+
       // Add ticket info if provided
-      if (ticketInfo.ticketNumber) {
-        requestBody.ticketNumber = ticketInfo.ticketNumber;
-        requestBody.ticketSystem = ticketInfo.ticketSystem || "Self-Service";
-      }
-      
-      // Use linked eligible role assignment ID if available for proper activation
-      if (group.assignmentId) {
-        requestBody.linkedEligibleRoleAssignmentId = group.assignmentId;
+      if (ticketInfo.ticketNumber || ticketInfo.ticketSystem) {
+        requestBody.ticketInfo = {
+          "ticketNumber": ticketInfo.ticketNumber || "N/A",
+          "ticketSystem": ticketInfo.ticketSystem || "Self-Service"
+        };
       }
 
-      // Send activation request to PIM API
+      // Send activation request to Graph API
       const response = await fetch(
-        'https://api.azrbac.mspim.azure.com/api/v2/privilegedAccess/aadGroups/roleAssignmentRequests',
+        'https://graph.microsoft.com/v1.0/identityGovernance/privilegedAccess/group/assignmentScheduleRequests',
         {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${pimToken}`,
+            'Authorization': `Bearer ${graphToken}`,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify(requestBody)
@@ -375,19 +363,17 @@ async function activateGroupMemberships(selectedGroups, durationHours, justifica
         } catch (e) {
           errorMessage = `HTTP ${response.status}: ${response.statusText}`;
         }
-        
+
         // Check if group membership is already activated
         if (response.status === 400 && (errorMessage.includes('already exists') || errorMessage.includes('already active') || errorMessage.includes('RoleAssignmentExists') || errorMessage.includes('ActiveDuration'))) {
           skipped.push({
             group: group.groupName || group.groupId,
             reason: 'Already activated'
           });
-          continue; // Skip to next group
+          continue;
         }
-        
-        throw new Error(
-          `API error (${response.status}): ${errorMessage}`
-        );
+
+        throw new Error(`API error (${response.status}): ${errorMessage}`);
       }
 
       const responseData = await response.json();
@@ -460,10 +446,10 @@ async function activateAllRoles(selectedRoles, durationHours, justification, gra
     }
   }
 
-  // Activate group memberships (requires PIM API token, not Graph token)
-  if (groupMemberships.length > 0 && pimToken) {
+  // Activate group memberships using Graph API (same token as directory roles)
+  if (groupMemberships.length > 0 && graphToken) {
     try {
-      const groupResult = await activateGroupMemberships(groupMemberships, durationHours, justification, pimToken, ticketInfo);
+      const groupResult = await activateGroupMemberships(groupMemberships, durationHours, justification, graphToken, ticketInfo);
       allResults.results.push(...groupResult.results);
       allResults.errors.push(...groupResult.errors);
       if (groupResult.skipped) allResults.skipped.push(...groupResult.skipped);
@@ -474,12 +460,12 @@ async function activateAllRoles(selectedRoles, durationHours, justification, gra
         error: error.message
       });
     }
-  } else if (groupMemberships.length > 0 && !pimToken) {
-    // No PIM token available for group activations
+  } else if (groupMemberships.length > 0 && !graphToken) {
+    // No Graph token available for group activations
     allResults.errors.push({
       group: 'PIM Group Memberships',
       success: false,
-      error: 'No PIM token available. Please browse to PIM > Groups in Azure Portal first.'
+      error: 'No Graph API token available. Please visit Microsoft Entra portal first.'
     });
   }
 

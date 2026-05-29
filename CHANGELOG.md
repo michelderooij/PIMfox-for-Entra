@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.0
+- Added: Firefox Multi-Account Containers support — when multiple containers are open, each container maintains its own independent token and role cache. PIMfox shows the correct account's roles based on whichever container's tab is currently active, enabling multi-account and multi-tenant workflows side-by-side.
+- Improved: The status bar now shows "Loading roles for [ID]" or "Roles loaded for [ID]", giving you a visual security context used for role fetching and display.
+- Fixed: Azure active resource roles used wall-clock time since token capture to determine whether the token had expired. The extension now reads the `exp` claim embedded in the JWT itself, consistent with how other token types are checked.
+- Fixed: PIM Groups functionality now use the Graph API exclusively.
+- Fixed: Removed delay in token status detection that could incorrectly report no token available if decryption of a stored token took slightly longer than expected.
+
 ## 1.3.2
 - Fixed: PIM Groups and Azure resource roles no longer falsely report an expired token when your session is still valid but the token was captured more than 45 minutes ago. The extension previously used the time since token capture as a proxy for expiry, which could block role loading for users with longer-lived sessions (e.g. due to Continuous Access Evaluation or extended token lifetimes configured in Entra ID).
 - Fixed: Expired tokens are now reliably detected even if they were captured very recently — the extension reads the actual expiration timestamp (`exp` claim) embedded in the token itself, rather than assuming a fixed 45-minute lifetime.

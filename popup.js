@@ -35,6 +35,8 @@ document.addEventListener('DOMContentLoaded', function() {
   let currentStatusFilter = 'all';
   let activeTimerIntervals = [];
   let refreshInterval = null;
+  let currentUpn = null;
+  let currentCookieStoreId = 'firefox-default';
 
   // Initialize immediately - simple and straightforward
   init();
@@ -62,7 +64,7 @@ document.addEventListener('DOMContentLoaded', function() {
   refreshButton.addEventListener('click', () => init(true));
   
   clearTokenButton.addEventListener('click', function() {
-    browser.runtime.sendMessage({ action: 'clearToken' }, function(response) {
+    browser.runtime.sendMessage({ action: 'clearToken', cookieStoreId: currentCookieStoreId }, function(response) {
       if (response && response.success) {
         init(); // Refresh the UI
       }
@@ -153,7 +155,7 @@ document.addEventListener('DOMContentLoaded', function() {
       // Update current filter
       currentFilter = this.dataset.filter;
 
-      browser.runtime.sendMessage({ action: 'invalidateRolesCache' });
+      browser.runtime.sendMessage({ action: 'invalidateRolesCache', cookieStoreId: currentCookieStoreId });
       filterRoles();
     });
   });
@@ -170,7 +172,7 @@ document.addEventListener('DOMContentLoaded', function() {
       // Update current status filter
       currentStatusFilter = this.dataset.statusFilter;
 
-      browser.runtime.sendMessage({ action: 'invalidateRolesCache' });
+      browser.runtime.sendMessage({ action: 'invalidateRolesCache', cookieStoreId: currentCookieStoreId });
       filterRoles();
     });
   });
@@ -210,85 +212,39 @@ document.addEventListener('DOMContentLoaded', function() {
     statusMessage.textContent = 'Activating roles...';
     activateButton.disabled = true;
 
-    // Get all tokens from storage
-    browser.storage.local.get(['graphToken', 'azureManagementToken', 'pimToken'], async function(data) {
+    // Get all tokens from background service (container-scoped)
+    browser.runtime.sendMessage({ action: 'getTokens', cookieStoreId: currentCookieStoreId }, async function(response) {
       try {
-        const encryptedGraphToken = data.graphToken;
-        const encryptedAzureToken = data.azureManagementToken;
-        const encryptedPimToken = data.pimToken;
+        if (!response || !response.success) {
+          showError('Failed to retrieve tokens. Please refresh your Microsoft session.');
+          activateButton.disabled = false;
+          return;
+        }
+
+        const { graphToken, azureManagementToken, pimToken } = response.tokens;
 
         // Check which types of roles are selected
         const hasDirectoryRoles = selectedRoles.some(r => r.roleType !== 'azureResource' && r.roleType !== 'group');
         const hasAzureResourceRoles = selectedRoles.some(r => r.roleType === 'azureResource');
         const hasGroupMemberships = selectedRoles.some(r => r.roleType === 'group');
 
-        // Validate encrypted tokens exist
-        if (hasDirectoryRoles && !encryptedGraphToken) {
+        // Validate tokens exist for selected role types
+        if (hasDirectoryRoles && !graphToken) {
           showError('No Graph API token found for Entra ID roles. Please visit Microsoft Entra portal first.');
           activateButton.disabled = false;
           return;
         }
 
-        if (hasAzureResourceRoles && !encryptedAzureToken) {
+        if (hasAzureResourceRoles && !azureManagementToken) {
           showError('No Azure Management token found for Azure resource roles. Please visit Azure Portal first.');
           activateButton.disabled = false;
           return;
         }
 
-        if (hasGroupMemberships && !encryptedPimToken) {
-          showError('No PIM API token found for group memberships. Please visit PIM Groups in Azure Portal first.');
+        if (hasGroupMemberships && !graphToken) {
+          showError('No Graph API token found for group memberships. Please visit Microsoft Entra portal first.');
           activateButton.disabled = false;
           return;
-        }
-
-        // Decrypt tokens before using them
-        let graphToken = null;
-        let azureManagementToken = null;
-        let pimToken = null;
-
-        if (hasDirectoryRoles && encryptedGraphToken) {
-          graphToken = await new Promise((resolve, reject) => {
-            browser.runtime.sendMessage({
-              action: 'decryptToken',
-              encryptedToken: encryptedGraphToken
-            }, (response) => {
-              if (response && response.success) {
-                resolve(response.token);
-              } else {
-                reject(new Error('Failed to decrypt Graph token'));
-              }
-            });
-          });
-        }
-
-        if (hasAzureResourceRoles && encryptedAzureToken) {
-          azureManagementToken = await new Promise((resolve, reject) => {
-            browser.runtime.sendMessage({
-              action: 'decryptToken',
-              encryptedToken: encryptedAzureToken
-            }, (response) => {
-              if (response && response.success) {
-                resolve(response.token);
-              } else {
-                reject(new Error('Failed to decrypt Azure Management token'));
-              }
-            });
-          });
-        }
-
-        if (hasGroupMemberships && encryptedPimToken) {
-          pimToken = await new Promise((resolve, reject) => {
-            browser.runtime.sendMessage({
-              action: 'decryptToken',
-              encryptedToken: encryptedPimToken
-            }, (response) => {
-              if (response && response.success) {
-                resolve(response.token);
-              } else {
-                reject(new Error('Failed to decrypt PIM token'));
-              }
-            });
-          });
         }
 
         // Prepare ticket information
@@ -384,14 +340,18 @@ document.addEventListener('DOMContentLoaded', function() {
           activateButton.disabled = false;
         });
       } catch (error) {
-        showError(`Token decryption error: ${error.message}`);
+        showError(`Activation error: ${error.message}`);
         activateButton.disabled = false;
       }
     });
   });
   
   // Main initialization function
-  function init(forceRefresh = false) {
+  async function init(forceRefresh = false) {
+    // Resolve current Firefox container before any messaging
+    const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+    currentCookieStoreId = tabs[0]?.cookieStoreId || 'firefox-default';
+
     // Clear any existing timer intervals
     activeTimerIntervals.forEach(clearInterval);
     activeTimerIntervals = [];
@@ -408,12 +368,13 @@ document.addEventListener('DOMContentLoaded', function() {
     statusMessage.textContent = 'Checking token';
     
     // Check token status
-    browser.runtime.sendMessage({ action: 'getTokenStatus' }, function(response) {
+    browser.runtime.sendMessage({ action: 'getTokenStatus', cookieStoreId: currentCookieStoreId }, function(response) {
       if (response && response.success) {
         updateTokenStatus(response.status);
+        currentUpn = response.status.upn || null;
         
         if (response.status.hasToken && !response.status.isExpired) {
-          statusMessage.textContent = 'Loading roles';
+          statusMessage.textContent = `Loading roles${currentUpn ? ` for ${currentUpn}` : ''}`;
           
           rolesContainer.classList.remove('hidden');
           rolesList.innerHTML = '<div class="loading-indicator"><div class="spinner"></div><p>Loading...</p></div>';
@@ -440,25 +401,25 @@ document.addEventListener('DOMContentLoaded', function() {
   // Load both eligible and active roles into unified view
   function loadAllRolesUnified(silentRefresh = false, forceRefresh = false) {
     if (!silentRefresh) {
-      statusMessage.textContent = 'Loading roles...';
+      statusMessage.textContent = currentUpn ? `Loading roles for ${currentUpn}` : 'Loading roles...';
     }
     
     // Fetch both eligible and active roles in parallel
     Promise.all([
       new Promise((resolve) => {
-        browser.runtime.sendMessage({ action: 'getAllRoles', forceRefresh }, (response) => {
+        browser.runtime.sendMessage({ action: 'getAllRoles', forceRefresh, cookieStoreId: currentCookieStoreId }, (response) => {
           resolve(response?.success ? response.data : null);
         });
       }),
       new Promise((resolve) => {
-        browser.runtime.sendMessage({ action: 'getActiveRoles', forceRefresh }, (response) => {
+        browser.runtime.sendMessage({ action: 'getActiveRoles', forceRefresh, cookieStoreId: currentCookieStoreId }, (response) => {
           resolve(response?.success ? response.data : null);
         });
       })
     ]).then(([eligibleData, activeData]) => {
       displayUnifiedRoles(eligibleData, activeData);
       initialLoading.classList.add('hidden');
-      statusMessage.textContent = 'Roles loaded';
+      statusMessage.textContent = currentUpn ? `Roles loaded for ${currentUpn}` : 'Roles loaded';
     }).catch((error) => {
       showError('Failed to load roles: ' + error.message);
     });
@@ -1368,7 +1329,7 @@ document.addEventListener('DOMContentLoaded', function() {
       
       // Reload roles after a delay to allow API to update
       setTimeout(() => {
-        statusMessage.textContent = 'Reloading roles...';
+        statusMessage.textContent = currentUpn ? `Loading roles for ${currentUpn}` : 'Reloading roles ..';
         loadAllRolesUnified(false);
       }, 2000);
     } catch (error) {
@@ -1379,7 +1340,8 @@ document.addEventListener('DOMContentLoaded', function() {
   // Deactivate a directory role
   async function deactivateDirectoryRole(role) {
     const response = await browser.runtime.sendMessage({
-      action: 'getTokens'
+      action: 'getTokens',
+      cookieStoreId: currentCookieStoreId
     });
 
     if (!response || !response.success || !response.tokens.graphToken) {
@@ -1429,7 +1391,8 @@ document.addEventListener('DOMContentLoaded', function() {
   // Deactivate an Azure resource role
   async function deactivateAzureResourceRole(role) {
     const response = await browser.runtime.sendMessage({
-      action: 'getTokens'
+      action: 'getTokens',
+      cookieStoreId: currentCookieStoreId
     });
 
     if (!response || !response.success || !response.tokens.azureManagementToken) {
@@ -1481,32 +1444,29 @@ document.addEventListener('DOMContentLoaded', function() {
   // Deactivate a PIM group membership
   async function deactivateGroupMembership(group) {
     const response = await browser.runtime.sendMessage({
-      action: 'getTokens'
+      action: 'getTokens',
+      cookieStoreId: currentCookieStoreId
     });
 
-    if (!response || !response.success || !response.tokens.pimToken) {
-      throw new Error('No PIM API token available. Please visit PIM Groups in Azure Portal to capture the token.');
+    if (!response || !response.success || !response.tokens.graphToken) {
+      throw new Error('No Graph API token available. Please visit Microsoft Entra portal.');
     }
 
-    const token = response.tokens.pimToken;
+    const token = response.tokens.graphToken;
     const principalId = group.principalId;
     const groupId = group.groupId;
-    const roleDefinitionId = group.roleDefinitionId || (group.accessId === 'owner' ? 'owner' : 'member');
 
-    // Use PIM API format for deactivation (same as portal)
-    // Note: API expects 'resourceId' not 'scopedResourceId'
-    // assignmentState must be 'Active' to deactivate the active assignment (not 'Eligible' which would remove eligibility)
+    // Use Graph API format for deactivation
     const requestBody = {
-      "assignmentState": "Active",
-      "type": "UserRemove",
-      "reason": "Self-deactivation via PIMfox",
-      "resourceId": groupId,
-      "subjectId": principalId,
-      "roleDefinitionId": roleDefinitionId
+      "action": "selfDeactivate",
+      "accessId": group.accessId || "member",
+      "principalId": principalId,
+      "groupId": groupId,
+      "justification": "Self-deactivation via PIMfox"
     };
 
     const apiResponse = await fetch(
-      'https://api.azrbac.mspim.azure.com/api/v2/privilegedAccess/aadGroups/roleAssignmentRequests',
+      'https://graph.microsoft.com/v1.0/identityGovernance/privilegedAccess/group/assignmentScheduleRequests',
       {
         method: 'POST',
         headers: {
@@ -1520,12 +1480,12 @@ document.addEventListener('DOMContentLoaded', function() {
     if (!apiResponse.ok) {
       const errorData = await apiResponse.json();
       const errorMessage = errorData.error?.message || errorData.message || `HTTP ${apiResponse.status}`;
-      
+
       // Check if group membership is already deactivated
-      if (apiResponse.status === 400 && (errorMessage.includes('does not exist') || errorMessage.includes('not active'))) {
+      if (apiResponse.status === 400 && (errorMessage.includes('does not exist') || errorMessage.includes('not active') || errorMessage.includes('No active assignment'))) {
         return { alreadyDeactivated: true };
       }
-      
+
       throw new Error(errorMessage);
     }
 

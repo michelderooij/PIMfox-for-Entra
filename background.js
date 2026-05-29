@@ -1,15 +1,30 @@
 console.log('PIMfox for Entra loaded');
 
-// Cache for roles data to enable instant popup display
-let cachedRolesData = null;
-let cachedRolesTimestamp = null;
-let cachedActiveRolesData = null;
-let cachedActiveRolesTimestamp = null;
+// Storage key helper — scopes keys to a Firefox container (cookieStoreId).
+// The default container uses the original unsuffixed key names for backward compatibility.
+function sk(base, cid) {
+  return (!cid || cid === 'firefox-default') ? base : `${base}::${cid}`;
+}
+
+// Resolve the cookieStoreId for the tab that originated a webRequest.
+// details.cookieStoreId is only populated in Firefox when the extension declares the
+// "contextualIdentities" permission; using browser.tabs.get() is more reliable and
+// consistent with how the popup reads the container via browser.tabs.query().
+function getTabCid(details) {
+  if (details.tabId <= 0) return Promise.resolve(details.cookieStoreId || 'firefox-default');
+  return browser.tabs.get(details.tabId)
+    .then(tab => tab?.cookieStoreId || details.cookieStoreId || 'firefox-default')
+    .catch(() => details.cookieStoreId || 'firefox-default');
+}
+
+// Per-container role cache (keyed by cookieStoreId)
+const rolesCache = new Map();        // cid → { data, timestamp }
+const activeRolesCache = new Map();  // cid → { data, timestamp }
 const CACHE_VALIDITY_MS = 90000; // 90 seconds
 
-// In-flight request deduplication — prevents duplicate parallel requests
-let allRolesInFlight = null;
-let activeRolesInFlight = null;
+// Per-container in-flight deduplication — prevents duplicate parallel requests
+const allRolesInFlight = new Map();    // cid → Promise
+const activeRolesInFlight = new Map(); // cid → Promise
 
 /**
  * Token Decoder Module
@@ -261,41 +276,42 @@ browser.webRequest.onSendHeaders.addListener(
         // Extract the token (remove "Bearer " prefix)
         const token = authHeader.value.substring(7);
 
-        // Encrypt and store the token
-        encryptToken(token).then(encryptedToken => {
-          browser.storage.local.set({
-            graphToken: encryptedToken,
-            tokenTimestamp: Date.now(),
-            tokenSource: details.url
-          });
-          console.log('Graph API token captured and encrypted from portal!');
-          
-          // Pre-fetch role definitions AND roles data to cache them for popup
-          // This prevents blocking popup rendering later
-          setTimeout(() => {
-            decryptToken(encryptedToken).then(decryptedToken => {
-              if (decryptedToken) {
-                // Fetch role definitions
-                getRoleDefinitions(decryptedToken).catch(err => {
-                  console.log('Background role definitions pre-fetch failed (non-critical):', err);
-                });
-                
-                // Fetch and cache all roles data for instant popup display
-                getAllRoles().then(rolesData => {
-                  cachedRolesData = rolesData;
-                  cachedRolesTimestamp = Date.now();
-                  console.log('Roles data pre-cached for instant popup display');
-                }).catch(err => {
-                  console.log('Background roles pre-fetch failed (non-critical):', err);
-                });
-              }
-            }).catch(err => {
-              console.log('Token decryption for pre-fetch failed:', err);
+        // Resolve container ID and encrypt token in parallel for no added latency
+        Promise.all([encryptToken(token), getTabCid(details)])
+          .then(([encryptedToken, cid]) => {
+            browser.storage.local.set({
+              [sk('graphToken', cid)]: encryptedToken,
+              [sk('tokenTimestamp', cid)]: Date.now(),
+              [sk('tokenSource', cid)]: details.url
             });
-          }, 100); // Small delay to not block token storage
-        }).catch(error => {
-          console.error('Failed to encrypt Graph token:', error);
-        });
+            console.log('Graph API token captured and encrypted from portal!');
+
+            // Pre-fetch role definitions AND roles data to cache them for popup
+            // This prevents blocking popup rendering later
+            setTimeout(() => {
+              decryptToken(encryptedToken).then(decryptedToken => {
+                if (decryptedToken) {
+                  // Fetch role definitions
+                  getRoleDefinitions(decryptedToken).catch(err => {
+                    console.log('Background role definitions pre-fetch failed (non-critical):', err);
+                  });
+
+                  // Fetch and cache all roles data for instant popup display
+                  getAllRoles(cid).then(rolesData => {
+                    rolesCache.set(cid, { data: rolesData, timestamp: Date.now() });
+                    console.log('Roles data pre-cached for instant popup display');
+                  }).catch(err => {
+                    console.log('Background roles pre-fetch failed (non-critical):', err);
+                  });
+                }
+              }).catch(err => {
+                console.log('Token decryption for pre-fetch failed:', err);
+              });
+            }, 100); // Small delay to not block token storage
+          })
+          .catch(error => {
+            console.error('Failed to encrypt Graph token:', error);
+          });
       }
     }
   },
@@ -320,17 +336,18 @@ browser.webRequest.onSendHeaders.addListener(
         // Extract the token (remove "Bearer " prefix)
         const token = authHeader.value.substring(7);
 
-        // Encrypt and store the Azure Management token separately
-        encryptToken(token).then(encryptedToken => {
-          browser.storage.local.set({
-            azureManagementToken: encryptedToken,
-            azureManagementTokenTimestamp: Date.now(),
-            azureManagementTokenSource: details.url
+        Promise.all([encryptToken(token), getTabCid(details)])
+          .then(([encryptedToken, cid]) => {
+            browser.storage.local.set({
+              [sk('azureManagementToken', cid)]: encryptedToken,
+              [sk('azureManagementTokenTimestamp', cid)]: Date.now(),
+              [sk('azureManagementTokenSource', cid)]: details.url
+            });
+            console.log('Azure Management API token captured and encrypted from portal!');
+          })
+          .catch(error => {
+            console.error('Failed to encrypt Azure Management token:', error);
           });
-          console.log('Azure Management API token captured and encrypted from portal!');
-        }).catch(error => {
-          console.error('Failed to encrypt Azure Management token:', error);
-        });
       }
     }
   },
@@ -355,22 +372,21 @@ browser.webRequest.onSendHeaders.addListener(
         // Extract the token (remove "Bearer " prefix)
         const token = authHeader.value.substring(7);
 
-        // Encrypt and store the PIM API token separately
-        encryptToken(token).then(encryptedToken => {
-          browser.storage.local.set({
-            pimToken: encryptedToken,
-            pimTokenTimestamp: Date.now(),
-            pimTokenSource: details.url
+        Promise.all([encryptToken(token), getTabCid(details)])
+          .then(([encryptedToken, cid]) => {
+            browser.storage.local.set({
+              [sk('pimToken', cid)]: encryptedToken,
+              [sk('pimTokenTimestamp', cid)]: Date.now(),
+              [sk('pimTokenSource', cid)]: details.url
+            });
+            // Invalidate roles cache for this container so the next popup open fetches fresh group data
+            rolesCache.delete(cid);
+            activeRolesCache.delete(cid);
+            console.log('PIM API token captured and encrypted from portal!');
+          })
+          .catch(error => {
+            console.error('Failed to encrypt PIM token:', error);
           });
-          // Invalidate roles cache so the next popup open fetches fresh group data
-          cachedRolesData = null;
-          cachedRolesTimestamp = null;
-          cachedActiveRolesData = null;
-          cachedActiveRolesTimestamp = null;
-          console.log('PIM API token captured and encrypted from portal!');
-        }).catch(error => {
-          console.error('Failed to encrypt PIM token:', error);
-        });
       }
     }
   },
@@ -385,38 +401,40 @@ function captureAuthToken(requestId, url) {
 
 // Handle messages from popup
 browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
+  const cid = request.cookieStoreId || 'firefox-default';
   if (request.action === "getPimRoles") {
-    getPimRoles()
+    getPimRoles(cid)
       .then(data => sendResponse({ success: true, data: data }))
       .catch(error => sendResponse({ success: false, error: error.toString() }));
     return true; // Indicates async response
   } else if (request.action === "getAzureResourceRoles") {
-    getAzureResourceRoles()
+    getAzureResourceRoles(cid)
       .then(data => sendResponse({ success: true, data: data }))
       .catch(error => sendResponse({ success: false, error: error.toString() }));
     return true;
   } else if (request.action === "getAllRoles") {
     console.log('[BACKGROUND] getAllRoles message received');
     const now = Date.now();
-    if (!request.forceRefresh && cachedRolesData && cachedRolesTimestamp && (now - cachedRolesTimestamp) < CACHE_VALIDITY_MS) {
-      console.log(`[BACKGROUND] Serving getAllRoles from cache (age: ${now - cachedRolesTimestamp}ms)`);
-      sendResponse({ success: true, data: cachedRolesData, fromCache: true });
+    const cached = rolesCache.get(cid);
+    if (!request.forceRefresh && cached && (now - cached.timestamp) < CACHE_VALIDITY_MS) {
+      console.log(`[BACKGROUND] Serving getAllRoles from cache (age: ${now - cached.timestamp}ms)`);
+      sendResponse({ success: true, data: cached.data, fromCache: true });
       return false;
     }
-    if (!allRolesInFlight) {
-      allRolesInFlight = getAllRoles()
+    if (!allRolesInFlight.has(cid)) {
+      allRolesInFlight.set(cid, getAllRoles(cid)
         .then(data => {
-          cachedRolesData = data;
-          cachedRolesTimestamp = Date.now();
-          allRolesInFlight = null;
+          rolesCache.set(cid, { data, timestamp: Date.now() });
+          allRolesInFlight.delete(cid);
           return data;
         })
         .catch(err => {
-          allRolesInFlight = null;
+          allRolesInFlight.delete(cid);
           throw err;
-        });
+        })
+      );
     }
-    allRolesInFlight
+    allRolesInFlight.get(cid)
       .then(data => {
         console.log('[BACKGROUND] Sending getAllRoles response');
         sendResponse({ success: true, data });
@@ -429,13 +447,14 @@ browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
   } else if (request.action === "getCachedRoles") {
     // Return cached roles instantly without async operation
     console.log('[BACKGROUND] getCachedRoles message received');
-    if (cachedRolesData && cachedRolesTimestamp) {
-      const age = Date.now() - cachedRolesTimestamp;
+    const cachedRoles = rolesCache.get(cid);
+    if (cachedRoles) {
+      const age = Date.now() - cachedRoles.timestamp;
       const isValid = age < CACHE_VALIDITY_MS;
       console.log(`[BACKGROUND] Returning cached roles (age: ${age}ms, valid: ${isValid})`);
       sendResponse({ 
         success: true, 
-        data: cachedRolesData, 
+        data: cachedRoles.data, 
         cached: true,
         cacheAge: age,
         cacheValid: isValid
@@ -447,38 +466,32 @@ browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
     return false; // Synchronous response
   } else if (request.action === "getActiveRoles") {
     const nowActive = Date.now();
-    if (!request.forceRefresh && cachedActiveRolesData && cachedActiveRolesTimestamp && (nowActive - cachedActiveRolesTimestamp) < CACHE_VALIDITY_MS) {
-      console.log(`[BACKGROUND] Serving getActiveRoles from cache (age: ${nowActive - cachedActiveRolesTimestamp}ms)`);
-      sendResponse({ success: true, data: cachedActiveRolesData, fromCache: true });
+    const cachedActive = activeRolesCache.get(cid);
+    if (!request.forceRefresh && cachedActive && (nowActive - cachedActive.timestamp) < CACHE_VALIDITY_MS) {
+      console.log(`[BACKGROUND] Serving getActiveRoles from cache (age: ${nowActive - cachedActive.timestamp}ms)`);
+      sendResponse({ success: true, data: cachedActive.data, fromCache: true });
       return false;
     }
-    if (!activeRolesInFlight) {
-      activeRolesInFlight = getActiveRoles()
+    if (!activeRolesInFlight.has(cid)) {
+      activeRolesInFlight.set(cid, getActiveRoles(cid)
         .then(data => {
-          cachedActiveRolesData = data;
-          cachedActiveRolesTimestamp = Date.now();
-          activeRolesInFlight = null;
+          activeRolesCache.set(cid, { data, timestamp: Date.now() });
+          activeRolesInFlight.delete(cid);
           return data;
         })
         .catch(err => {
-          activeRolesInFlight = null;
+          activeRolesInFlight.delete(cid);
           throw err;
-        });
+        })
+      );
     }
-    activeRolesInFlight
+    activeRolesInFlight.get(cid)
       .then(data => sendResponse({ success: true, data }))
       .catch(error => sendResponse({ success: false, error: error.toString() }));
     return true;
   } else if (request.action === "getTokenStatus") {
     console.log('[BACKGROUND] getTokenStatus message received');
-    // Respond quickly to avoid blocking popup
-    Promise.race([
-      getTokenStatus(),
-      new Promise((resolve) => setTimeout(() => {
-        console.log('[BACKGROUND] getTokenStatus timeout, returning hasToken: false');
-        resolve({ hasToken: false, timeout: true });
-      }, 500))
-    ])
+    getTokenStatus(cid)
       .then(status => {
         console.log('[BACKGROUND] Sending tokenStatus response:', status);
         sendResponse({ success: true, status: status });
@@ -489,12 +502,10 @@ browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
       });
     return true;
   } else if (request.action === "clearToken") {
-    clearToken()
+    clearToken(cid)
       .then(() => {
-        cachedRolesData = null;
-        cachedRolesTimestamp = null;
-        cachedActiveRolesData = null;
-        cachedActiveRolesTimestamp = null;
+        rolesCache.delete(cid);
+        activeRolesCache.delete(cid);
         sendResponse({ success: true });
       })
       .catch(error => sendResponse({ success: false, error: error.toString() }));
@@ -505,21 +516,22 @@ browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
       .catch(error => sendResponse({ success: false, error: error.toString() }));
     return true;
   } else if (request.action === "getTokens") {
-    // Get all tokens for role activation/deactivation
-    browser.storage.local.get(['graphToken', 'azureManagementToken', 'pimToken'])
+    // Get all tokens for role activation/deactivation (container-scoped)
+    const [_gk, _amk, _pk] = [sk('graphToken', cid), sk('azureManagementToken', cid), sk('pimToken', cid)];
+    browser.storage.local.get([_gk, _amk, _pk])
       .then(async (result) => {
         const tokens = {};
         
-        if (result.graphToken) {
-          tokens.graphToken = await decryptToken(result.graphToken);
+        if (result[_gk]) {
+          tokens.graphToken = await decryptToken(result[_gk]);
         }
         
-        if (result.azureManagementToken) {
-          tokens.azureManagementToken = await decryptToken(result.azureManagementToken);
+        if (result[_amk]) {
+          tokens.azureManagementToken = await decryptToken(result[_amk]);
         }
         
-        if (result.pimToken) {
-          tokens.pimToken = await decryptToken(result.pimToken);
+        if (result[_pk]) {
+          tokens.pimToken = await decryptToken(result[_pk]);
         }
         
         sendResponse({ success: true, tokens: tokens });
@@ -527,33 +539,31 @@ browser.runtime.onMessage.addListener(function(request, sender, sendResponse) {
       .catch(error => sendResponse({ success: false, error: error.toString() }));
     return true;
   } else if (request.action === 'invalidateRolesCache') {
-    cachedRolesData = null;
-    cachedRolesTimestamp = null;
-    cachedActiveRolesData = null;
-    cachedActiveRolesTimestamp = null;
+    rolesCache.delete(cid);
+    activeRolesCache.delete(cid);
     sendResponse({ success: true });
     return false;
   }
 });
 
-// Cache for group names to avoid repeated API calls
-let groupNamesCache = {};
-let groupNamesCacheTime = null;
+// Per-container cache for group names (keyed by cookieStoreId)
+const groupNamesCache = new Map(); // cid → { names: {}, timestamp }
 const GROUP_NAMES_CACHE_VALIDITY_MS = 300000; // 5 minutes
 
 // Function to resolve group IDs to group names using Graph API
-async function resolveGroupNames(groupIds) {
+async function resolveGroupNames(groupIds, cid = 'firefox-default') {
   if (!groupIds || groupIds.length === 0) return {};
   
-  // Check cache first
+  // Check per-container cache first
   const now = Date.now();
-  if (groupNamesCacheTime && (now - groupNamesCacheTime) < GROUP_NAMES_CACHE_VALIDITY_MS) {
+  const cidCache = groupNamesCache.get(cid) || { names: {}, timestamp: null };
+  if (cidCache.timestamp && (now - cidCache.timestamp) < GROUP_NAMES_CACHE_VALIDITY_MS) {
     // Return cached names for known IDs
     const cachedResults = {};
     let allCached = true;
     for (const id of groupIds) {
-      if (groupNamesCache[id]) {
-        cachedResults[id] = groupNamesCache[id];
+      if (cidCache.names[id]) {
+        cachedResults[id] = cidCache.names[id];
       } else {
         allCached = false;
       }
@@ -565,8 +575,9 @@ async function resolveGroupNames(groupIds) {
   }
   
   try {
-    // Get Graph token
-    const { graphToken: encryptedGraphToken } = await browser.storage.local.get(['graphToken']);
+    // Get Graph token (container-scoped)
+    const _gk = sk('graphToken', cid);
+    const { [_gk]: encryptedGraphToken } = await browser.storage.local.get([_gk]);
     if (!encryptedGraphToken) {
       console.warn('No Graph token for group name resolution');
       return {};
@@ -582,8 +593,8 @@ async function resolveGroupNames(groupIds) {
     
     // Fetch each group's details (batch if needed for large sets)
     for (const groupId of groupIds) {
-      if (groupNamesCache[groupId]) {
-        results[groupId] = groupNamesCache[groupId];
+      if (cidCache.names[groupId]) {
+        results[groupId] = cidCache.names[groupId];
         continue;
       }
       
@@ -603,7 +614,7 @@ async function resolveGroupNames(groupIds) {
           const group = await response.json();
           if (group.displayName) {
             results[groupId] = group.displayName;
-            groupNamesCache[groupId] = group.displayName;
+            cidCache.names[groupId] = group.displayName;
           }
         } else {
           console.warn(`Failed to fetch group ${groupId}: ${response.status}`);
@@ -613,7 +624,7 @@ async function resolveGroupNames(groupIds) {
       }
     }
     
-    groupNamesCacheTime = Date.now();
+    groupNamesCache.set(cid, { names: cidCache.names, timestamp: Date.now() });
     return results;
   } catch (error) {
     console.error('Error resolving group names:', error);
@@ -621,68 +632,42 @@ async function resolveGroupNames(groupIds) {
   }
 }
 
-// Function to get PIM group eligibilities
-async function getPimGroupEligibilities() {
+// Function to get PIM group eligibilities using Graph API
+async function getPimGroupEligibilities(cid = 'firefox-default') {
   try {
-    // Get PIM token and Graph token from storage
-    // PIM token is captured when user browses to PIM Groups in Azure Portal
-    const { graphToken: encryptedGraphToken, pimToken: encryptedPimToken, pimTokenTimestamp } = 
-      await browser.storage.local.get(['graphToken', 'pimToken', 'pimTokenTimestamp']);
-    
-    // PIM Groups requires the special PIM API token, not the Graph token
-    if (!encryptedPimToken) {
-      console.warn('No PIM token available. Please browse to PIM > Groups in Azure Portal to capture the token.');
-      return { value: [], permissionDenied: true, needsPimToken: true };
+    const _gk = sk('graphToken', cid);
+    const { [_gk]: encryptedGraphToken } = await browser.storage.local.get([_gk]);
+
+    if (!encryptedGraphToken) {
+      console.warn('No Graph token available for PIM group eligibilities.');
+      return { value: [], permissionDenied: true };
     }
-    
-    // Decrypt the PIM token
-    const pimToken = await decryptToken(encryptedPimToken);
-    
-    if (!pimToken) {
-      throw new Error('Failed to decrypt PIM token.');
+
+    const graphToken = await decryptToken(encryptedGraphToken);
+    if (!graphToken) {
+      throw new Error('Failed to decrypt Graph token.');
     }
-    
-    // Check actual JWT expiry from the token's exp claim (more accurate than wall-clock)
-    const decodedPimToken = decodeToken(pimToken);
-    if (decodedPimToken?.exp) {
-      if (decodedPimToken.exp < Math.floor(Date.now() / 1000)) {
-        return { value: [], permissionDenied: true, tokenExpired: true };
-      }
-    } else if (pimTokenTimestamp) {
-      // Fallback: wall-clock check if token cannot be decoded
-      const tokenAgeInMinutes = (Date.now() - pimTokenTimestamp) / (1000 * 60);
-      if (tokenAgeInMinutes > 45) {
-        return { value: [], permissionDenied: true, tokenExpired: true };
-      }
+
+    // Check token expiry from JWT exp claim
+    const decodedToken = decodeToken(graphToken);
+    if (decodedToken?.exp && decodedToken.exp < Math.floor(Date.now() / 1000)) {
+      return { value: [], permissionDenied: true, tokenExpired: true };
     }
-    
-    // Extract principalId from decoded token (reuse already-decoded result)
-    let principalId = decodedPimToken?.oid || null;
-    if (!principalId && encryptedGraphToken) {
-      const graphToken = await decryptToken(encryptedGraphToken);
-      principalId = extractPrincipalId(graphToken);
-    }
-    if (!principalId) {
-      throw new Error('Could not extract user ID from token.');
-    }
-    
-    console.log('Fetching PIM group eligibilities using PIM API');
-    
-    // Use the PIM API endpoint (same as Azure Portal uses)
-    const filter = encodeURIComponent(`(subject/id eq '${principalId}') and (assignmentState eq 'Eligible')`);
-    const expand = encodeURIComponent('linkedEligibleRoleAssignment,subject,scopedResource,roleDefinition($expand=resource)');
-    
+
+    console.log('Fetching PIM group eligibilities using Graph API');
+
     const response = await fetch(
-      `https://api.azrbac.mspim.azure.com/api/v2/privilegedAccess/aadGroups/roleAssignments?$expand=${expand}&$filter=${filter}&$count=true`,
+      "https://graph.microsoft.com/v1.0/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances/filterByCurrentUser(on='principal')?$expand=group,principal&$count=true",
       {
-        method: "GET",
+        method: 'GET',
         headers: {
-          'Authorization': `Bearer ${pimToken}`,
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${graphToken}`,
+          'Content-Type': 'application/json',
+          'ConsistencyLevel': 'eventual'
         }
       }
     );
-    
+
     if (!response.ok) {
       if (response.status === 403 || response.status === 401) {
         console.warn('PIM group eligibilities fetch failed - permission denied. Status:', response.status);
@@ -690,67 +675,23 @@ async function getPimGroupEligibilities() {
       }
       throw new Error(`API call failed: ${response.status} ${response.statusText}`);
     }
-    
+
     const data = await response.json();
-    
-    // Transform the response to match our expected format
-    const transformedData = { value: [] };
-    
-    if (data.value && data.value.length > 0) {
-      // Helper to extract group ID from various possible response fields
-      const extractGroupId = (assignment) => {
-        return assignment.scopedResource?.id || 
-               assignment.resourceId || 
-               assignment.resource?.id ||
-               assignment.scopedResourceId ||
-               assignment.roleDefinition?.resource?.id || '';
-      };
-      
-      // Collect group IDs that need name resolution
-      const groupIdsNeedingNames = [];
-      data.value.forEach(assignment => {
-        const groupId = extractGroupId(assignment);
-        const hasName = assignment.scopedResource?.displayName && 
-                        assignment.scopedResource.displayName !== 'Unknown Group';
-        if (groupId && !hasName) {
-          groupIdsNeedingNames.push(groupId);
-        }
-      });
-      
-      // Resolve group names from Graph API if needed
-      let resolvedNames = {};
-      if (groupIdsNeedingNames.length > 0) {
-        console.log(`Resolving ${groupIdsNeedingNames.length} group name(s) from Graph API`);
-        resolvedNames = await resolveGroupNames(groupIdsNeedingNames);
-      }
-      
-      transformedData.value = data.value.map(assignment => {
-        const groupId = extractGroupId(assignment);
-        let groupName = assignment.scopedResource?.displayName || assignment.scopedResource?.externalId;
-        
-        // If no name from PIM API, try resolved names
-        if (!groupName || groupName === 'Unknown Group') {
-          groupName = resolvedNames[groupId] || 'Unknown Group';
-        }
-        
-        // Extract role definition ID
-        const roleDefId = assignment.roleDefinition?.id || assignment.roleDefinitionId;
-        const accessType = assignment.roleDefinition?.displayName === 'Owner' ? 'owner' : 'member';
-        
-        return {
-          groupId: groupId,
-          groupName: groupName,
-          principalId: assignment.subject?.id || principalId,
-          accessId: accessType,
-          roleDefinitionId: roleDefId,
-          assignmentType: 'group',
-          assignmentId: assignment.id,
-          startDateTime: assignment.startDateTime,
-          endDateTime: assignment.endDateTime
-        };
-      });
-    }
-    
+
+    const transformedData = {
+      value: (data.value || []).map(item => ({
+        groupId: item.groupId,
+        groupName: item.group?.displayName || 'Unknown Group',
+        principalId: item.principalId,
+        accessId: item.accessId,
+        roleDefinitionId: item.accessId,
+        assignmentType: 'group',
+        assignmentId: item.id,
+        startDateTime: item.startDateTime,
+        endDateTime: item.endDateTime
+      }))
+    };
+
     return transformedData;
   } catch (error) {
     console.error('Error getting PIM group eligibilities:', error);
@@ -758,69 +699,42 @@ async function getPimGroupEligibilities() {
   }
 }
 
-// Function to get active PIM group memberships
-async function getActiveGroupMemberships() {
+// Function to get active PIM group memberships using Graph API
+async function getActiveGroupMemberships(cid = 'firefox-default') {
   try {
-    // Get PIM token and Graph token from storage
-    const { graphToken: encryptedGraphToken, pimToken: encryptedPimToken, pimTokenTimestamp } = 
-      await browser.storage.local.get(['graphToken', 'pimToken', 'pimTokenTimestamp']);
-    
-    // PIM Groups requires the special PIM API token
-    if (!encryptedPimToken) {
-      console.warn('No PIM token available for active group memberships.');
-      return { value: [], permissionDenied: true, needsPimToken: true };
+    const _gk = sk('graphToken', cid);
+    const { [_gk]: encryptedGraphToken } = await browser.storage.local.get([_gk]);
+
+    if (!encryptedGraphToken) {
+      console.warn('No Graph token available for active group memberships.');
+      return { value: [], permissionDenied: true };
     }
-    
-    // Decrypt the PIM token
-    const pimToken = await decryptToken(encryptedPimToken);
-    
-    if (!pimToken) {
-      throw new Error('Failed to decrypt PIM token.');
+
+    const graphToken = await decryptToken(encryptedGraphToken);
+    if (!graphToken) {
+      throw new Error('Failed to decrypt Graph token.');
     }
-    
-    // Check actual JWT expiry from the token's exp claim (more accurate than wall-clock)
-    const decodedPimToken = decodeToken(pimToken);
-    if (decodedPimToken?.exp) {
-      if (decodedPimToken.exp < Math.floor(Date.now() / 1000)) {
-        return { value: [], permissionDenied: true, tokenExpired: true };
-      }
-    } else if (pimTokenTimestamp) {
-      // Fallback: wall-clock check if token cannot be decoded
-      const tokenAgeInMinutes = (Date.now() - pimTokenTimestamp) / (1000 * 60);
-      if (tokenAgeInMinutes > 45) {
-        return { value: [], permissionDenied: true, tokenExpired: true };
-      }
+
+    // Check token expiry from JWT exp claim
+    const decodedToken = decodeToken(graphToken);
+    if (decodedToken?.exp && decodedToken.exp < Math.floor(Date.now() / 1000)) {
+      return { value: [], permissionDenied: true, tokenExpired: true };
     }
-    
-    // Extract principalId from decoded token (reuse already-decoded result)
-    let principalId = decodedPimToken?.oid || null;
-    if (!principalId && encryptedGraphToken) {
-      const graphToken = await decryptToken(encryptedGraphToken);
-      principalId = extractPrincipalId(graphToken);
-    }
-    if (!principalId) {
-      throw new Error('Could not extract user ID from token.');
-    }
-    
-    console.log('Fetching active PIM group memberships using PIM API');
-    
-    // Use the PIM API endpoint for active assignments
-    const filter = encodeURIComponent(`(subject/id eq '${principalId}') and (assignmentState eq 'Active')`);
-    const expand = encodeURIComponent('linkedEligibleRoleAssignment,subject,scopedResource,roleDefinition($expand=resource)');
-    
+
+    console.log('Fetching active PIM group memberships using Graph API');
+
     const response = await fetch(
-      `https://api.azrbac.mspim.azure.com/api/v2/privilegedAccess/aadGroups/roleAssignments?$expand=${expand}&$filter=${filter}&$count=true`,
+      "https://graph.microsoft.com/v1.0/identityGovernance/privilegedAccess/group/assignmentScheduleInstances/filterByCurrentUser(on='principal')?$expand=group,principal&$count=true",
       {
-        method: "GET",
+        method: 'GET',
         headers: {
-          'Authorization': `Bearer ${pimToken}`,
+          'Authorization': `Bearer ${graphToken}`,
           'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache'
+          'ConsistencyLevel': 'eventual'
         }
       }
     );
-    
+
     if (!response.ok) {
       if (response.status === 403 || response.status === 401) {
         console.warn('Active PIM group memberships fetch failed - permission denied. Status:', response.status);
@@ -828,86 +742,32 @@ async function getActiveGroupMemberships() {
       }
       throw new Error(`API call failed: ${response.status} ${response.statusText}`);
     }
-    
+
     const data = await response.json();
-    
-    // Transform the response to match our expected format
-    const transformedData = { value: [] };
-    
-    if (data.value && data.value.length > 0) {
-      const now = new Date();
-      
-      // Filter for currently active assignments
-      const activeAssignments = data.value.filter(assignment => {
-        const startDateTime = assignment.startDateTime;
-        const endDateTime = assignment.endDateTime;
-        
-        if (!startDateTime) return false;
-        
-        const start = new Date(startDateTime);
-        const end = endDateTime ? new Date(endDateTime) : null;
-        
-        if (end) {
-          return start <= now && end > now;
-        } else {
-          return start <= now;
-        }
-      });
-      
-      // Helper to extract group ID
-      const extractGroupId = (assignment) => {
-        return assignment.scopedResource?.id || 
-               assignment.resourceId || 
-               assignment.resource?.id ||
-               assignment.scopedResourceId ||
-               assignment.roleDefinition?.resource?.id || '';
-      };
-      
-      // Collect group IDs that need name resolution
-      const groupIdsNeedingNames = [];
-      activeAssignments.forEach(assignment => {
-        const groupId = extractGroupId(assignment);
-        const hasName = assignment.scopedResource?.displayName && 
-                        assignment.scopedResource.displayName !== 'Unknown Group';
-        if (groupId && !hasName) {
-          groupIdsNeedingNames.push(groupId);
-        }
-      });
-      
-      // Resolve group names from Graph API if needed
-      let resolvedNames = {};
-      if (groupIdsNeedingNames.length > 0) {
-        console.log(`Resolving ${groupIdsNeedingNames.length} active group name(s) from Graph API`);
-        resolvedNames = await resolveGroupNames(groupIdsNeedingNames);
-      }
-      
-      transformedData.value = activeAssignments.map(assignment => {
-        const groupId = extractGroupId(assignment);
-        let groupName = assignment.scopedResource?.displayName || assignment.scopedResource?.externalId;
-        
-        // If no name from PIM API, try resolved names
-        if (!groupName || groupName === 'Unknown Group') {
-          groupName = resolvedNames[groupId] || 'Unknown Group';
-        }
-        
-        // Extract role definition ID
-        const roleDefId = assignment.roleDefinition?.id || assignment.roleDefinitionId;
-        const accessType = assignment.roleDefinition?.displayName === 'Owner' ? 'owner' : 'member';
-        
-        return {
-          groupId: groupId,
-          groupName: groupName,
-          principalId: assignment.subject?.id || principalId,
-          accessId: accessType,
-          roleDefinitionId: roleDefId,
-          assignmentType: 'group',
-          assignmentId: assignment.id,
-          startDateTime: assignment.startDateTime,
-          endDateTime: assignment.endDateTime
-        };
-      });
-    }
-    
+
+    // Filter for currently active assignments
+    const now = new Date();
+    const activeItems = (data.value || []).filter(item => {
+      if (!item.startDateTime) return false;
+      const start = new Date(item.startDateTime);
+      const end = item.endDateTime ? new Date(item.endDateTime) : null;
+      return start <= now && (!end || end > now);
+    });
+
+    const transformedData = {
+      value: activeItems.map(item => ({
+        groupId: item.groupId,
+        groupName: item.group?.displayName || 'Unknown Group',
+        principalId: item.principalId,
+        accessId: item.accessId,
+        roleDefinitionId: item.accessId,
+        assignmentType: 'group',
+        assignmentId: item.id,
+        startDateTime: item.startDateTime,
+        endDateTime: item.endDateTime
+      }))
+    };
+
     return transformedData;
   } catch (error) {
     console.error('Error getting active PIM group memberships:', error);
@@ -916,11 +776,12 @@ async function getActiveGroupMemberships() {
 }
 
 // Function to get PIM roles using the stored token
-async function getPimRoles() {
+async function getPimRoles(cid = 'firefox-default') {
   try {
     // Get Graph token from storage - this is all we need now
-    const { graphToken: encryptedGraphToken, tokenTimestamp } = 
-      await browser.storage.local.get(['graphToken', 'tokenTimestamp']);
+    const [_gk, _tsk] = [sk('graphToken', cid), sk('tokenTimestamp', cid)];
+    const { [_gk]: encryptedGraphToken, [_tsk]: tokenTimestamp } =
+      await browser.storage.local.get([_gk, _tsk]);
     
     if (!encryptedGraphToken) {
       console.warn('No Graph token available for PIM directory roles.');
@@ -1087,9 +948,10 @@ async function getRoleDefinitions(token) {
 }
 
 // Function to get token status
-async function getTokenStatus() {
-  const { graphToken: encryptedToken, tokenTimestamp, tokenSource } = 
-    await browser.storage.local.get(['graphToken', 'tokenTimestamp', 'tokenSource']);
+async function getTokenStatus(cid = 'firefox-default') {
+  const [_gk, _tsk, _srck] = [sk('graphToken', cid), sk('tokenTimestamp', cid), sk('tokenSource', cid)];
+  const { [_gk]: encryptedToken, [_tsk]: tokenTimestamp, [_srck]: tokenSource } =
+    await browser.storage.local.get([_gk, _tsk, _srck]);
   
   if (!encryptedToken) {
     return { hasToken: false };
@@ -1114,26 +976,30 @@ async function getTokenStatus() {
     hasToken: true,
     tokenAge: Math.round(tokenAgeInMinutes),
     isExpired,
-    source: tokenSource
+    source: tokenSource,
+    upn: decoded?.upn || decoded?.preferred_username || decoded?.email || null
   };
 }
 
 // Function to clear the stored token
-async function clearToken() {
-  await browser.storage.local.remove([
+async function clearToken(cid = 'firefox-default') {
+  const baseKeys = [
     'graphToken', 'tokenTimestamp', 'tokenSource',
     'azureManagementToken', 'azureManagementTokenTimestamp', 'azureManagementTokenSource',
     'pimToken', 'pimTokenTimestamp', 'pimTokenSource'
-  ]);
+  ];
+  // sk() returns original key for 'firefox-default' (backward compat)
+  await browser.storage.local.remove(baseKeys.map(k => sk(k, cid)));
   return true;
 }
 
 // Function to get Azure resource PIM roles using the Azure Management token
-async function getAzureResourceRoles() {
+async function getAzureResourceRoles(cid = 'firefox-default') {
   try {
     // Get token from storage
-    const { azureManagementToken: encryptedToken, azureManagementTokenTimestamp } =
-      await browser.storage.local.get(['azureManagementToken', 'azureManagementTokenTimestamp']);
+    const [_amk, _amtk] = [sk('azureManagementToken', cid), sk('azureManagementTokenTimestamp', cid)];
+    const { [_amk]: encryptedToken, [_amtk]: azureManagementTokenTimestamp } =
+      await browser.storage.local.get([_amk, _amtk]);
 
     if (!encryptedToken) {
       throw new Error('No Azure Management token found. Please visit Azure Portal first.');
@@ -1273,9 +1139,10 @@ function getMaxDurationFromRules(rules) {
 
 // Fetch Entra directory role activation duration limits via policy API
 // Returns Map<roleDefinitionId, maxHours>
-async function getEntraRolePolicies() {
+async function getEntraRolePolicies(cid = 'firefox-default') {
   try {
-    const { graphToken: encryptedToken } = await browser.storage.local.get(['graphToken']);
+    const _gk = sk('graphToken', cid);
+    const { [_gk]: encryptedToken } = await browser.storage.local.get([_gk]);
     if (!encryptedToken) return new Map();
     const graphToken = await decryptToken(encryptedToken);
     if (!graphToken) return new Map();
@@ -1304,10 +1171,11 @@ async function getEntraRolePolicies() {
 
 // Fetch group PIM role activation duration limits via policy API
 // Returns Map<groupId, maxHours>
-async function getGroupRolePolicies(groupIds) {
+async function getGroupRolePolicies(groupIds, cid = 'firefox-default') {
   if (!groupIds || groupIds.length === 0) return new Map();
   try {
-    const { graphToken: encryptedToken } = await browser.storage.local.get(['graphToken']);
+    const _gk = sk('graphToken', cid);
+    const { [_gk]: encryptedToken } = await browser.storage.local.get([_gk]);
     if (!encryptedToken) return new Map();
     const graphToken = await decryptToken(encryptedToken);
     if (!graphToken) return new Map();
@@ -1341,10 +1209,11 @@ async function getGroupRolePolicies(groupIds) {
 
 // Fetch Azure resource role activation duration limits via ARM policy API
 // Returns Map<`${roleDefinitionId}@${subscriptionId}`, maxHours>
-async function getAzureResourceRolePolicies(subscriptionIds) {
+async function getAzureResourceRolePolicies(subscriptionIds, cid = 'firefox-default') {
   if (!subscriptionIds || subscriptionIds.length === 0) return new Map();
   try {
-    const { azureManagementToken: encryptedToken } = await browser.storage.local.get(['azureManagementToken']);
+    const _amk = sk('azureManagementToken', cid);
+    const { [_amk]: encryptedToken } = await browser.storage.local.get([_amk]);
     if (!encryptedToken) return new Map();
     const azureToken = await decryptToken(encryptedToken);
     if (!azureToken) return new Map();
@@ -1398,7 +1267,7 @@ async function getAzureResourceRolePolicies(subscriptionIds) {
 }
 
 // Function to get all roles (both directory and Azure resource roles)
-async function getAllRoles() {
+async function getAllRoles(cid = 'firefox-default') {
   try {
     const results = {
       directoryRoles: { value: [] },
@@ -1409,7 +1278,7 @@ async function getAllRoles() {
 
     // Try to get directory roles
     try {
-      const directoryRoles = await getPimRoles();
+      const directoryRoles = await getPimRoles(cid);
       results.directoryRoles = directoryRoles;
       
       // Add warning if permission was denied
@@ -1433,7 +1302,7 @@ async function getAllRoles() {
 
     // Try to get Azure resource roles
     try {
-      const azureResourceRoles = await getAzureResourceRoles();
+      const azureResourceRoles = await getAzureResourceRoles(cid);
       results.azureResourceRoles = azureResourceRoles;
     } catch (error) {
       console.error('Error fetching Azure resource roles:', error);
@@ -1442,27 +1311,19 @@ async function getAllRoles() {
 
     // Try to get PIM group eligibilities
     try {
-      const groupEligibilities = await getPimGroupEligibilities();
+      const groupEligibilities = await getPimGroupEligibilities(cid);
       results.groupEligibilities = groupEligibilities;
       
-      // Add specific warning if PIM token is needed
-      if (groupEligibilities.needsPimToken) {
+      if (groupEligibilities.tokenExpired) {
         results.errors.push({ 
           type: 'groupEligibilities', 
-          error: 'PIM Groups use a separate token from your main token. Navigate to PIM → Groups in Azure Portal to capture it.',
-          warning: true,
-          needsPimToken: true
-        });
-      } else if (groupEligibilities.tokenExpired) {
-        results.errors.push({ 
-          type: 'groupEligibilities', 
-          error: 'PIM Groups token has expired (your main token is fine). Navigate to PIM → Groups in Azure Portal and hard-reload the page (Ctrl+Shift+R) to refresh it.',
+          error: 'Your Graph API token has expired. Please hard-reload (Ctrl+Shift+R) the Entra portal page to refresh it.',
           warning: true
         });
       } else if (groupEligibilities.permissionDenied) {
         results.errors.push({ 
           type: 'groupEligibilities', 
-          error: 'Could not fetch PIM Group eligibilities. Navigate to PIM → Groups in Azure Portal.',
+          error: 'Could not fetch PIM Group eligibilities. Please visit Microsoft Entra portal and sign in.',
           warning: true
         });
       } else if (groupEligibilities.error) {
@@ -1484,9 +1345,9 @@ async function getAllRoles() {
       )];
 
       const [entraPolMap, groupPolMap, azurePolMap] = await Promise.all([
-        getEntraRolePolicies(),
-        getGroupRolePolicies(uniqueGroupIds),
-        getAzureResourceRolePolicies(uniqueSubscriptionIds)
+        getEntraRolePolicies(cid),
+        getGroupRolePolicies(uniqueGroupIds, cid),
+        getAzureResourceRolePolicies(uniqueSubscriptionIds, cid)
       ]);
 
       // Merge maxActivationDuration into each directory role
@@ -1521,11 +1382,12 @@ async function getAllRoles() {
     throw error;
   }
 }
-async function getActiveDirectoryRoles() {
+async function getActiveDirectoryRoles(cid = 'firefox-default') {
   try {
     // Get Graph token from storage - this is all we need now
-    const { graphToken: encryptedGraphToken, tokenTimestamp } =
-      await browser.storage.local.get(['graphToken', 'tokenTimestamp']);
+    const [_gk, _tsk] = [sk('graphToken', cid), sk('tokenTimestamp', cid)];
+    const { [_gk]: encryptedGraphToken, [_tsk]: tokenTimestamp } =
+      await browser.storage.local.get([_gk, _tsk]);
 
     if (!encryptedGraphToken) {
       console.warn('No Graph token available for active directory roles.');
@@ -1634,11 +1496,12 @@ async function getActiveDirectoryRoles() {
 }
 
 // Function to get active Azure resource roles
-async function getActiveAzureResourceRoles() {
+async function getActiveAzureResourceRoles(cid = 'firefox-default') {
   try {
     // Get token from storage
-    const { azureManagementToken: encryptedToken, azureManagementTokenTimestamp } =
-      await browser.storage.local.get(['azureManagementToken', 'azureManagementTokenTimestamp']);
+    const [_amk, _amtk] = [sk('azureManagementToken', cid), sk('azureManagementTokenTimestamp', cid)];
+    const { [_amk]: encryptedToken, [_amtk]: azureManagementTokenTimestamp } =
+      await browser.storage.local.get([_amk, _amtk]);
 
     if (!encryptedToken) {
       throw new Error('No Azure Management token found. Please visit Azure Portal first.');
@@ -1651,13 +1514,17 @@ async function getActiveAzureResourceRoles() {
       throw new Error('Failed to decrypt Azure Management token. Please clear tokens and re-authenticate.');
     }
 
-    // Check if token is older than 45 minutes
-    if (!azureManagementTokenTimestamp) {
-      throw new Error('Token timestamp missing. Please re-authenticate.');
-    }
-    const tokenAgeInMinutes = (Date.now() - azureManagementTokenTimestamp) / (1000 * 60);
-    if (tokenAgeInMinutes > 45) {
-      throw new Error('Token may have expired. Please refresh your Azure Portal session.');
+    // Check JWT exp claim for accurate expiry; fall back to wall-clock if token can't be decoded
+    const decodedAzureToken = decodeToken(azureManagementToken);
+    if (decodedAzureToken?.exp) {
+      if (decodedAzureToken.exp < Math.floor(Date.now() / 1000)) {
+        throw new Error('Azure Management token has expired. Please refresh your Azure Portal session.');
+      }
+    } else if (azureManagementTokenTimestamp) {
+      const tokenAgeInMinutes = (Date.now() - azureManagementTokenTimestamp) / (1000 * 60);
+      if (tokenAgeInMinutes > 45) {
+        throw new Error('Azure Management token may have expired. Please refresh your Azure Portal session.');
+      }
     }
 
     console.log('Using captured token to fetch active Azure resource roles');
@@ -1791,7 +1658,7 @@ async function getActiveAzureResourceRoles() {
 }
 
 // Function to get all active roles (both directory and Azure resource)
-async function getActiveRoles() {
+async function getActiveRoles(cid = 'firefox-default') {
   try {
     const results = {
       activeDirectoryRoles: { value: [] },
@@ -1802,9 +1669,9 @@ async function getActiveRoles() {
 
     // Fetch all three active role types in parallel
     const [adrSettled, aarrSettled, agmSettled] = await Promise.allSettled([
-      getActiveDirectoryRoles(),
-      getActiveAzureResourceRoles(),
-      getActiveGroupMemberships()
+      getActiveDirectoryRoles(cid),
+      getActiveAzureResourceRoles(cid),
+      getActiveGroupMemberships(cid)
     ]);
 
     // Process active directory roles
@@ -1828,23 +1695,16 @@ async function getActiveRoles() {
     if (agmSettled.status === 'fulfilled') {
       const activeGroupMemberships = agmSettled.value;
       results.activeGroupMemberships = activeGroupMemberships;
-      if (activeGroupMemberships.needsPimToken) {
+      if (activeGroupMemberships.tokenExpired) {
         results.errors.push({ 
           type: 'activeGroupMemberships', 
-          error: 'PIM Groups use a separate token from your main token. Navigate to PIM → Groups in Azure Portal to capture it.',
-          warning: true,
-          needsPimToken: true
-        });
-      } else if (activeGroupMemberships.tokenExpired) {
-        results.errors.push({ 
-          type: 'activeGroupMemberships', 
-          error: 'PIM Groups token has expired. Navigate to PIM → Groups in Azure Portal to refresh it.',
+          error: 'Your Graph API token has expired. Please hard-reload (Ctrl+Shift+R) the Entra portal page to refresh it.',
           warning: true
         });
       } else if (activeGroupMemberships.permissionDenied) {
         results.errors.push({ 
           type: 'activeGroupMemberships', 
-          error: 'Could not fetch active PIM Group memberships. Navigate to PIM → Groups in Azure Portal.',
+          error: 'Could not fetch active PIM Group memberships. Please visit Microsoft Entra portal and sign in.',
           warning: true
         });
       } else if (activeGroupMemberships.error) {
