@@ -120,6 +120,8 @@ PIMfox has no login screen of its own and never asks for your password. It works
 
 Tokens are short-lived (typically 60–90 minutes) and only exist in your browser while the portal is actively making requests. If you have not yet opened a portal, or all previously captured tokens have expired, there is nothing for PIMfox to work with. A brief visit to the relevant portal — even just navigating to the home page — is enough to trigger a fresh token to be issued and captured.
 
+Once a portal tab is open, PIMfox does not require you to refresh manually. It watches in the background and detects the moment the portal sends a new API request (either from your own navigation or from the portal's built-in background refresh, which runs roughly every 60–90 seconds). As soon as a token is captured, PIMfox automatically loads and displays your roles. While waiting, the status bar shows *"Waiting for portal activity…"*. If no token is captured within two minutes, PIMfox falls back to displaying the standard sign-in instructions.
+
 **Why can't the extension use the token from one portal to obtain tokens for the other portals?**
 
 Every bearer token is cryptographically bound to a specific API audience. A token issued for Microsoft Graph (`graph.microsoft.com`) carries an `aud` claim that locks it to that endpoint; if you present it to the Azure Management API (`management.azure.com`), Microsoft will reject it with a 401 error — the audience doesn't match. The reverse is equally true.
@@ -141,13 +143,13 @@ PIMfox displays inline notices at the top of the role list when it cannot fully 
 | *"The current portal token lacks PIM permissions. Navigate to PIM → Roles in Azure Portal, then refresh PIMfox."* | A Graph token was captured, but it was obtained from a portal page that did not request PIM scopes. Navigate specifically to the PIM blade so the portal requests a token with the required permissions. |
 | *"Could not fetch directory roles. Please navigate to PIM → Roles in Azure Portal, then refresh PIMfox."* | The Graph token is present but the API returned a permission denied response for directory role listings. Visiting the PIM → Roles page forces the portal to acquire a token with the correct scope. |
 | *"Your Graph API token has expired. Please hard-reload (Ctrl+Shift+R) the Entra portal page to refresh it."* | The stored Graph token has passed its expiry time. A hard reload forces the portal to acquire a completely fresh token, which PIMfox will capture automatically. |
-| *"Could not fetch PIM Group eligibilities / active PIM Group memberships. Please visit Microsoft Entra portal and sign in."* | No Graph token has been captured yet, or it was cleared. Visit the Entra portal and browse briefly to trigger token capture. |
+| *"Could not fetch PIM Group eligibilities. Please visit Microsoft Entra portal and sign in."* | No Graph token has been captured yet, or it was cleared. Visit the Entra portal and browse briefly to trigger token capture. PIMfox will detect the token automatically once it is captured. |
 
 **Why are my roles not showing?**
 
 Several things can cause roles to be absent or partially visible:
 
-- **No token captured yet** — you have not visited the relevant portal since installing the extension or since the last token was cleared. Visit the Entra portal (for Entra ID roles and PIM Groups) and/or the Azure portal (for Azure resource roles) to trigger capture.
+- **No token captured yet** — you have not visited the relevant portal since installing the extension or since the last token was cleared. Visit the Entra portal (for Entra ID roles and PIM Groups) and/or the Azure portal (for Azure resource roles) to trigger capture. PIMfox will detect the token automatically and load your roles — no manual refresh required. While waiting, the status bar shows *"Waiting for portal activity…"*.
 - **Token expired** — tokens are valid for roughly 60–90 minutes. If the popup shows an expiry warning, hard-reload the portal page (`Ctrl+Shift+R`) and re-open PIMfox.
 - **Insufficient token scope** — the token was captured from a page that did not request PIM permissions. Navigate specifically to the PIM section of the Entra portal, then refresh PIMfox.
 - **Active filter or search** — the type filter chips (Direct, PIM Groups, Azure Resource) or status filter (Eligible, Active) may be narrowing the list. Check that "All" is selected, and clear any search text.

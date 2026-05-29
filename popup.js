@@ -35,6 +35,7 @@ document.addEventListener('DOMContentLoaded', function() {
   let currentStatusFilter = 'all';
   let activeTimerIntervals = [];
   let refreshInterval = null;
+  let tokenPollInterval = null;
   let currentUpn = null;
   let currentCookieStoreId = 'firefox-default';
 
@@ -359,6 +360,10 @@ document.addEventListener('DOMContentLoaded', function() {
       clearInterval(refreshInterval);
       refreshInterval = null;
     }
+    if (tokenPollInterval) {
+      clearInterval(tokenPollInterval);
+      tokenPollInterval = null;
+    }
     
     // Immediately show UI - synchronous, no callbacks
     initialLoading.classList.remove('hidden');
@@ -387,10 +392,26 @@ document.addEventListener('DOMContentLoaded', function() {
             loadAllRolesUnified(true); // silent refresh, serves from cache
           }, 30000);
         } else {
-          // No valid token
+          // No valid token — start polling until the portal makes an API call
           initialLoading.classList.add('hidden');
           noTokenView.classList.remove('hidden');
-          statusMessage.textContent = 'No valid token';
+          statusMessage.textContent = 'Waiting for portal activity...';
+          tokenPollInterval = setInterval(() => {
+            browser.runtime.sendMessage({ action: 'getTokenStatus', cookieStoreId: currentCookieStoreId }, (pollResponse) => {
+              if (pollResponse?.success && pollResponse.status.hasToken && !pollResponse.status.isExpired) {
+                clearInterval(tokenPollInterval);
+                tokenPollInterval = null;
+                init();
+              }
+            });
+          }, 5000);
+          setTimeout(() => {
+            if (tokenPollInterval) {
+              clearInterval(tokenPollInterval);
+              tokenPollInterval = null;
+              statusMessage.textContent = 'No valid token';
+            }
+          }, 120000);
         }
       } else {
         showError(response?.error || 'Failed to check token');
@@ -492,6 +513,8 @@ document.addEventListener('DOMContentLoaded', function() {
       _seenErrors.add(e.error);
       // Suppress "needs PIM token" warnings when group data loaded successfully
       if (hasGroupData && e.needsPimToken) return false;
+      // Suppress "no token" group warnings when we already have group data (token is valid)
+      if (hasGroupData && e.noToken) return false;
       return true;
     });
 

@@ -640,7 +640,7 @@ async function getPimGroupEligibilities(cid = 'firefox-default') {
 
     if (!encryptedGraphToken) {
       console.warn('No Graph token available for PIM group eligibilities.');
-      return { value: [], permissionDenied: true };
+      return { value: [], permissionDenied: true, noToken: true };
     }
 
     const graphToken = await decryptToken(encryptedGraphToken);
@@ -671,7 +671,7 @@ async function getPimGroupEligibilities(cid = 'firefox-default') {
     if (!response.ok) {
       if (response.status === 403 || response.status === 401) {
         console.warn('PIM group eligibilities fetch failed - permission denied. Status:', response.status);
-        return { value: [], permissionDenied: true };
+        return { value: [], permissionDenied: true, scopeError: true };
       }
       throw new Error(`API call failed: ${response.status} ${response.statusText}`);
     }
@@ -707,7 +707,7 @@ async function getActiveGroupMemberships(cid = 'firefox-default') {
 
     if (!encryptedGraphToken) {
       console.warn('No Graph token available for active group memberships.');
-      return { value: [], permissionDenied: true };
+      return { value: [], permissionDenied: true, noToken: true };
     }
 
     const graphToken = await decryptToken(encryptedGraphToken);
@@ -737,8 +737,11 @@ async function getActiveGroupMemberships(cid = 'firefox-default') {
 
     if (!response.ok) {
       if (response.status === 403 || response.status === 401) {
-        console.warn('Active PIM group memberships fetch failed - permission denied. Status:', response.status);
-        return { value: [], permissionDenied: true };
+        // 403 here means either no active group memberships or insufficient scope.
+        // The portal only requests PrivilegedAssignmentSchedule.Read.AzureADGroup when
+        // active assignments exist — background-poll tokens lack it. Treat as empty.
+        console.warn('Active PIM group memberships returned', response.status, '— treating as no active assignments.');
+        return { value: [] };
       }
       throw new Error(`API call failed: ${response.status} ${response.statusText}`);
     }
@@ -1321,11 +1324,21 @@ async function getAllRoles(cid = 'firefox-default') {
           warning: true
         });
       } else if (groupEligibilities.permissionDenied) {
-        results.errors.push({ 
-          type: 'groupEligibilities', 
-          error: 'Could not fetch PIM Group eligibilities. Please visit Microsoft Entra portal and sign in.',
-          warning: true
-        });
+        if (groupEligibilities.scopeError) {
+          results.errors.push({
+            type: 'groupEligibilities',
+            error: 'Could not fetch PIM Group eligibilities — the token may lack sufficient permissions. Try navigating to PIM → Groups in the Entra portal to refresh the token scopes.',
+            warning: true,
+            scopeError: true
+          });
+        } else {
+          results.errors.push({ 
+            type: 'groupEligibilities', 
+            error: 'Could not fetch PIM Group eligibilities. Please visit Microsoft Entra portal and sign in.',
+            warning: true,
+            noToken: true
+          });
+        }
       } else if (groupEligibilities.error) {
         results.errors.push({ type: 'groupEligibilities', error: groupEligibilities.error, warning: true });
       }
@@ -1705,7 +1718,8 @@ async function getActiveRoles(cid = 'firefox-default') {
         results.errors.push({ 
           type: 'activeGroupMemberships', 
           error: 'Could not fetch active PIM Group memberships. Please visit Microsoft Entra portal and sign in.',
-          warning: true
+          warning: true,
+          noToken: true
         });
       } else if (activeGroupMemberships.error) {
         results.errors.push({ type: 'activeGroupMemberships', error: activeGroupMemberships.error, warning: true });

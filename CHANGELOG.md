@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1
+- Fixed: A spurious "Could not fetch active PIM Group memberships — please visit Microsoft Entra portal and sign in" notice could appear alongside visible eligible group roles. The notice was shown whenever the `assignmentScheduleInstances` API returned HTTP 403, but the same code path was also used for a missing token, conflating two unrelated situations. The extension now distinguishes between no token stored (the sign-in prompt is appropriate) and an API-level 403 (treated as no active assignments, since the Entra portal only requests the `PrivilegedAssignmentSchedule.Read.AzureADGroup` scope when active group assignments exist — background-poll tokens reliably lack it).
+- Improved: When no valid token is present, the extension now automatically detects the moment the portal makes an API call and transitions to the roles view without requiring a manual refresh. While waiting, the status bar shows "Waiting for portal activity…". If no token is captured within two minutes the static "No valid token" state is shown as before.
+
 ## 1.4.0
 - Added: Firefox Multi-Account Containers support — when multiple containers are open, each container maintains its own independent token and role cache. PIMfox shows the correct account's roles based on whichever container's tab is currently active, enabling multi-account and multi-tenant workflows side-by-side.
 - Improved: The status bar now shows "Loading roles for [ID]" or "Roles loaded for [ID]", giving you a visual security context used for role fetching and display.
