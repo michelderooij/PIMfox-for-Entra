@@ -138,6 +138,16 @@ function getSelectedRoles() {
     .filter(role => role !== null);
 }
 
+// Validates an ARM scope path so it cannot be used to construct an unexpected URL.
+// Expected forms: /subscriptions/{guid}[/resourceGroups/{name}[/providers/...]]
+const ARM_SCOPE_RE = /^\/subscriptions\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\/[^?#]*)?$/i;
+function validateArmScope(scope) {
+  if (!scope || typeof scope !== 'string' || !ARM_SCOPE_RE.test(scope)) {
+    throw new Error(`Invalid ARM scope value: "${scope}"`);
+  }
+  return scope;
+}
+
 // Function to activate Azure resource PIM roles
 async function activateAzureResourceRoles(selectedRoles, durationHours, justification, azureManagementToken, ticketInfo = {}) {
   if (!azureManagementToken) {
@@ -172,8 +182,8 @@ async function activateAzureResourceRoles(selectedRoles, durationHours, justific
       // Generate a new GUID for the request
       const requestId = generateGuid();
 
-      // Extract scope from the role (could be subscription, resource group, or resource)
-      const scope = role.properties?.scope || `/subscriptions/${role.subscriptionId}`;
+      // Extract and validate scope before using it in a URL path.
+      const scope = validateArmScope(role.properties?.scope || `/subscriptions/${role.subscriptionId}`);
 
       // Prepare request body for Azure Resource Manager API
       const requestBody = {
@@ -260,13 +270,8 @@ async function activateAzureResourceRoles(selectedRoles, durationHours, justific
   };
 }
 
-// Helper function to generate a GUID
 function generateGuid() {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    const r = Math.random() * 16 | 0;
-    const v = c === 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
+  return crypto.randomUUID();
 }
 
 // Function to activate PIM group memberships using PIM API
