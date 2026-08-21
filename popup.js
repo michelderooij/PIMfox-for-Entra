@@ -1166,17 +1166,6 @@ document.addEventListener('DOMContentLoaded', function() {
     // DON'T clear keepalive - let it run until popup actually closes
   }
   
-  // Helper function to safely escape HTML
-  function escapeHTML(str) {
-    if (!str) return '';
-    return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
-  }
-  
   // Function to gather selected roles with their data (handles both role types)
   function getSelectedRoles() {
     const selectedRoles = [];
@@ -1424,7 +1413,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
     const token = response.tokens.azureManagementToken;
     const requestId = generateGuid();
-    const scope = role.properties?.scope || `/subscriptions/${role.subscriptionId}`;
+    const rawScope = role.properties?.scope || `/subscriptions/${role.subscriptionId}`;
+    const ARM_SCOPE_RE = /^\/subscriptions\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\/[^?#]*)?$/i;
+    if (!ARM_SCOPE_RE.test(rawScope)) {
+      throw new Error(`Invalid ARM scope value: "${rawScope}"`);
+    }
+    const scope = rawScope;
     const principalId = role.properties?.principalId || role.principalId;
     const roleDefinitionId = role.properties?.roleDefinitionId || role.roleDefinitionId;
 
@@ -1515,13 +1509,8 @@ document.addEventListener('DOMContentLoaded', function() {
     return await apiResponse.json();
   }
 
-  // Helper function to generate a GUID
   function generateGuid() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-      const r = Math.random() * 16 | 0;
-      const v = c === 'x' ? r : (r & 0x3 | 0x8);
-      return v.toString(16);
-    });
+    return crypto.randomUUID();
   }
 
 });

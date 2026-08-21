@@ -109,7 +109,12 @@ function checkTokenHasPimScopes(token) {
  * Encrypts sensitive tokens before storing in local storage
  */
 
-// Derive encryption key from extension runtime ID (stable across sessions)
+// Session-scoped encryption key — generated once per background script lifetime
+// using cryptographically random bytes. Tokens stored in local storage are only
+// readable while this background script instance is running; stale encrypted blobs
+// from a previous session will fail to decrypt and are treated as absent, prompting
+// the user to re-visit the portal. This is intentional — captured JWT tokens expire
+// within the hour anyway, so cross-session persistence of stored ciphertext has no value.
 let encryptionKey = null;
 
 async function getEncryptionKey() {
@@ -117,21 +122,14 @@ async function getEncryptionKey() {
     return encryptionKey;
   }
 
-  // Use extension ID as key material (stable and unique per installation)
-  const keyMaterial = browser.runtime.id || 'pimfox-default-key-material';
-  const encoder = new TextEncoder();
-  const keyData = encoder.encode(keyMaterial.padEnd(32, '0').substring(0, 32));
-
-  // Import raw key material
-  const importedKey = await crypto.subtle.importKey(
+  const rawKey = crypto.getRandomValues(new Uint8Array(32));
+  encryptionKey = await crypto.subtle.importKey(
     'raw',
-    keyData,
+    rawKey,
     { name: 'AES-GCM', length: 256 },
     false,
     ['encrypt', 'decrypt']
   );
-
-  encryptionKey = importedKey;
   return encryptionKey;
 }
 
@@ -163,7 +161,7 @@ async function encryptToken(token) {
     return btoa(String.fromCharCode(...combined));
   } catch (error) {
     console.error('Token encryption failed:', error);
-    return token; // Fallback to unencrypted if encryption fails
+    throw error; // Never store a token unencrypted; surface the failure instead.
   }
 }
 
@@ -200,12 +198,9 @@ async function decryptToken(encryptedToken) {
     console.error('Decrypted token is not a valid JWT format');
     return null;
   } catch (error) {
+    // Decryption fails if the stored blob was encrypted by a previous session's key
+    // (expected after browser restart). Treat as absent — user must re-visit the portal.
     console.error('Token decryption failed:', error);
-    // Try to check if it's already an unencrypted JWT token (for backward compatibility)
-    if (encryptedToken && typeof encryptedToken === 'string' && encryptedToken.split('.').length === 3) {
-      console.log('Token appears to be unencrypted JWT, using as-is');
-      return encryptedToken;
-    }
     return null;
   }
 }
@@ -822,8 +817,6 @@ async function getPimRoles(cid = 'firefox-default') {
     if (!principalId) {
       throw new Error('Could not extract user ID from token. Please refresh your session.');
     }
-    
-    console.log('Using principalId:', principalId);
     
     // Use Microsoft Graph API for directory role eligibilities
     const filter = encodeURIComponent(`principalId eq '${principalId}'`);
@@ -1464,8 +1457,6 @@ async function getActiveDirectoryRoles(cid = 'firefox-default') {
     }
 
     const data = await response.json();
-
-    console.log('Active directory roles API response:', data);
 
     // Filter for only time-bound assignments (PIM activations, not permanent)
     const now = new Date();
