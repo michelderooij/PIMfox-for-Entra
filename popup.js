@@ -2,7 +2,6 @@ document.addEventListener('DOMContentLoaded', function() {
   // Get DOM elements
   const statusMessage = document.getElementById('status-message');
   const refreshButton = document.getElementById('refresh-button');
-  const darkModeToggle = document.getElementById('dark-mode-toggle');
   const tokenStatus = document.getElementById('token-status');
   const noTokenView = document.getElementById('no-token-view');
   const rolesContainer = document.getElementById('roles-container');
@@ -11,6 +10,7 @@ document.addEventListener('DOMContentLoaded', function() {
   const errorDetails = document.getElementById('error-details');
   const clearTokenButton = document.getElementById('clear-token-button');
   const initialLoading = document.getElementById('initial-loading');
+  const popupVersion = document.getElementById('popup-version');
   
   // New elements for role activation
   const durationSlider = document.getElementById('duration-slider');
@@ -26,43 +26,162 @@ document.addEventListener('DOMContentLoaded', function() {
   const roleSearch = document.getElementById('role-search');
   const clearSearchBtn = document.getElementById('clear-search');
   const searchResultsCount = document.getElementById('search-results-count');
-  const filterChips = document.querySelectorAll('.filter-chip[data-filter]');
-  const statusFilterChips = document.querySelectorAll('.filter-chip[data-status-filter]');
+  const typeFilterDropdown = document.getElementById('type-filter-dropdown');
+  const typeFilterToggle = document.getElementById('type-filter-toggle');
+  const typeFilterMenu = document.getElementById('type-filter-menu');
+  const typeFilterOptions = document.querySelectorAll('.type-filter-option');
+  const statusFilterDropdown = document.getElementById('status-filter-dropdown');
+  const statusFilterToggle = document.getElementById('status-filter-toggle');
+  const statusFilterMenu = document.getElementById('status-filter-menu');
+  const statusFilterOptions = document.querySelectorAll('.status-filter-option');
 
   // State for search and filter
   let currentSearchTerm = '';
-  let currentFilter = 'all';
-  let currentStatusFilter = 'all';
+  const selectedTypeFilters = new Set(['all']);
+  const selectedStatusFilters = new Set(['all']);
   let activeTimerIntervals = [];
   let refreshInterval = null;
   let tokenPollInterval = null;
   let currentUpn = null;
   let currentCookieStoreId = 'firefox-default';
+  const DEFAULT_INITIAL_DURATION_HOURS = 8;
+  const DEFAULT_MAX_ACTIVATION_HOURS = 24;
+
+  function formatDurationHours(hours) {
+    if (!Number.isFinite(hours)) return String(DEFAULT_INITIAL_DURATION_HOURS);
+    return hours % 1 === 0 ? String(hours) : hours.toFixed(1);
+  }
 
   // Initialize immediately - simple and straightforward
+  if (popupVersion) {
+    const manifestVersion = browser.runtime.getManifest()?.version;
+    popupVersion.textContent = manifestVersion ? `v${manifestVersion}` : 'v?';
+  }
+
   init();
 
-  // Dark mode: restore saved preference and wire up toggle
-  browser.storage.local.get('darkMode', function(result) {
-    // Use stored preference if set; otherwise fall back to browser/OS preference
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const useDark = (result.darkMode !== undefined) ? result.darkMode : prefersDark;
-    if (useDark) {
-      document.body.classList.add('dark-mode');
-      darkModeToggle.textContent = '☀️';
-      darkModeToggle.title = 'Switch to light mode';
-    }
-  });
-
-  darkModeToggle.addEventListener('click', function() {
-    const isDark = document.body.classList.toggle('dark-mode');
-    darkModeToggle.textContent = isDark ? '☀️' : '🌙';
-    darkModeToggle.title = isDark ? 'Switch to light mode' : 'Toggle dark mode';
-    browser.storage.local.set({ darkMode: isDark });
-  });
+  // Dark mode: follow browser/OS preference only
+  const darkModeMediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+  function applyPreferredColorScheme() {
+    document.body.classList.toggle('dark-mode', darkModeMediaQuery.matches);
+  }
+  applyPreferredColorScheme();
+  darkModeMediaQuery.addEventListener('change', applyPreferredColorScheme);
 
   // Setup event listeners
   refreshButton.addEventListener('click', () => init(true));
+
+  function updateFilterToggleLabels() {
+    const typeLabelMap = {
+      directory: 'Direct',
+      group: 'PIM Groups',
+      azureResource: 'Azure Resource'
+    };
+    const statusLabelMap = {
+      eligible: 'Eligible',
+      active: 'Active'
+    };
+
+    if (selectedTypeFilters.has('all')) {
+      typeFilterToggle.textContent = 'Type: All';
+    } else {
+      const labels = Array.from(selectedTypeFilters).map(v => typeLabelMap[v]).filter(Boolean);
+      typeFilterToggle.textContent = `Type: ${labels.join(', ')}`;
+    }
+
+    if (selectedStatusFilters.has('all')) {
+      statusFilterToggle.textContent = 'Status: All';
+    } else {
+      const labels = Array.from(selectedStatusFilters).map(v => statusLabelMap[v]).filter(Boolean);
+      statusFilterToggle.textContent = `Status: ${labels.join(', ')}`;
+    }
+  }
+
+  function syncFilterOptionCheckboxes() {
+    typeFilterOptions.forEach(option => {
+      option.checked = selectedTypeFilters.has(option.value);
+    });
+    statusFilterOptions.forEach(option => {
+      option.checked = selectedStatusFilters.has(option.value);
+    });
+    updateFilterToggleLabels();
+  }
+
+  function toggleFilterSelection(filterSet, changedValue, isChecked) {
+    if (changedValue === 'all') {
+      filterSet.clear();
+      filterSet.add('all');
+      return;
+    }
+
+    filterSet.delete('all');
+    if (isChecked) {
+      filterSet.add(changedValue);
+    } else {
+      filterSet.delete(changedValue);
+    }
+
+    if (filterSet.size === 0) {
+      filterSet.add('all');
+    }
+  }
+
+  function closeFilterMenus() {
+    typeFilterMenu.classList.add('hidden');
+    statusFilterMenu.classList.add('hidden');
+    typeFilterToggle.setAttribute('aria-expanded', 'false');
+    statusFilterToggle.setAttribute('aria-expanded', 'false');
+  }
+
+  function toggleFilterMenu(menu, toggleButton, otherMenu, otherToggleButton) {
+    const opening = menu.classList.contains('hidden');
+    otherMenu.classList.add('hidden');
+    otherToggleButton.setAttribute('aria-expanded', 'false');
+
+    if (opening) {
+      menu.classList.remove('hidden');
+      toggleButton.setAttribute('aria-expanded', 'true');
+    } else {
+      menu.classList.add('hidden');
+      toggleButton.setAttribute('aria-expanded', 'false');
+    }
+  }
+
+  typeFilterToggle.addEventListener('click', function(e) {
+    e.stopPropagation();
+    toggleFilterMenu(typeFilterMenu, typeFilterToggle, statusFilterMenu, statusFilterToggle);
+  });
+
+  statusFilterToggle.addEventListener('click', function(e) {
+    e.stopPropagation();
+    toggleFilterMenu(statusFilterMenu, statusFilterToggle, typeFilterMenu, typeFilterToggle);
+  });
+
+  document.addEventListener('click', function(e) {
+    if (!typeFilterDropdown.contains(e.target) && !statusFilterDropdown.contains(e.target)) {
+      closeFilterMenus();
+    }
+  });
+
+  typeFilterOptions.forEach(option => {
+    option.addEventListener('change', function() {
+      toggleFilterSelection(selectedTypeFilters, this.value, this.checked);
+      syncFilterOptionCheckboxes();
+      browser.runtime.sendMessage({ action: 'invalidateRolesCache', cookieStoreId: currentCookieStoreId });
+      filterRoles();
+    });
+  });
+
+  statusFilterOptions.forEach(option => {
+    option.addEventListener('change', function() {
+      toggleFilterSelection(selectedStatusFilters, this.value, this.checked);
+      syncFilterOptionCheckboxes();
+      browser.runtime.sendMessage({ action: 'invalidateRolesCache', cookieStoreId: currentCookieStoreId });
+      filterRoles();
+    });
+  });
+
+  syncFilterOptionCheckboxes();
   
   clearTokenButton.addEventListener('click', function() {
     browser.runtime.sendMessage({ action: 'clearToken', cookieStoreId: currentCookieStoreId }, function(response) {
@@ -82,43 +201,33 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // Slider event listener
   durationSlider.addEventListener('input', function() {
-    durationValue.textContent = durationSlider.value;
+    durationValue.textContent = formatDurationHours(parseFloat(durationSlider.value));
   });
 
   // Update the slider maximum based on the lowest policy max of all checked roles
   function updateSliderMax() {
     const checkedBoxes = document.querySelectorAll('.role-checkbox:checked');
-    const durationAdjustInfo = document.getElementById('duration-adjust-info');
 
     let effectiveMax;
     if (checkedBoxes.length === 0) {
-      effectiveMax = 8;
+      effectiveMax = DEFAULT_MAX_ACTIVATION_HOURS;
     } else {
       const maxDurations = Array.from(checkedBoxes).map(cb => {
         const roleItem = cb.closest('.role-item');
-        return parseFloat(roleItem?.dataset.maxDuration || 8);
+        return parseFloat(roleItem?.dataset.maxDuration || DEFAULT_MAX_ACTIVATION_HOURS);
       });
-      effectiveMax = Math.min(Math.min(...maxDurations), 8);
+      effectiveMax = Math.min(...maxDurations);
     }
 
     const currentMax = parseFloat(durationSlider.max);
     if (Math.abs(effectiveMax - currentMax) > 0.001) {
       durationSlider.max = effectiveMax;
-      if (parseFloat(durationSlider.value) > effectiveMax) {
-        durationSlider.value = effectiveMax;
-        durationValue.textContent = effectiveMax % 1 === 0 ? String(effectiveMax) : effectiveMax.toFixed(1);
-      }
     }
 
-    if (durationAdjustInfo) {
-      if (checkedBoxes.length > 0 && effectiveMax < 8) {
-        const label = effectiveMax % 1 === 0 ? String(effectiveMax) : effectiveMax.toFixed(1);
-        durationAdjustInfo.textContent = `\u2139\uFE0F Maximum duration adjusted to ${label}h based on current selection of roles, PIM groups and Azure resources.`;
-        durationAdjustInfo.classList.remove('hidden');
-      } else {
-        durationAdjustInfo.classList.add('hidden');
-      }
-    }
+    // Use min(8, effectiveMax) as the initial value whenever selection context changes.
+    const initialDuration = Math.min(DEFAULT_INITIAL_DURATION_HOURS, effectiveMax);
+    durationSlider.value = initialDuration;
+    durationValue.textContent = formatDurationHours(initialDuration);
   }
 
   // Search input event listener
@@ -144,40 +253,6 @@ document.addEventListener('DOMContentLoaded', function() {
     roleSearch.focus();
   });
 
-  // Filter chip event listeners
-  filterChips.forEach(chip => {
-    chip.addEventListener('click', function() {
-      // Remove active class from all type filter chips
-      filterChips.forEach(c => c.classList.remove('active'));
-
-      // Add active class to clicked chip
-      this.classList.add('active');
-
-      // Update current filter
-      currentFilter = this.dataset.filter;
-
-      browser.runtime.sendMessage({ action: 'invalidateRolesCache', cookieStoreId: currentCookieStoreId });
-      filterRoles();
-    });
-  });
-
-  // Status filter chip event listeners
-  statusFilterChips.forEach(chip => {
-    chip.addEventListener('click', function() {
-      // Remove active class from all status filter chips
-      statusFilterChips.forEach(c => c.classList.remove('active'));
-
-      // Add active class to clicked chip
-      this.classList.add('active');
-
-      // Update current status filter
-      currentStatusFilter = this.dataset.statusFilter;
-
-      browser.runtime.sendMessage({ action: 'invalidateRolesCache', cookieStoreId: currentCookieStoreId });
-      filterRoles();
-    });
-  });
-
   // Keyboard shortcut: Ctrl+F to focus search
   document.addEventListener('keydown', function(e) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
@@ -190,7 +265,7 @@ document.addEventListener('DOMContentLoaded', function() {
   // Add activation button event listener
   activateButton.addEventListener('click', function() {
     const selectedRoles = getSelectedRoles();
-    const duration = parseFloat(durationSlider.value);
+    let duration = parseFloat(durationSlider.value);
     const justification = justificationText.value.trim();
     const ticketSystemValue = ticketSystem.value.trim();
     const ticketNumberValue = ticketNumber.value.trim();
@@ -203,6 +278,24 @@ document.addEventListener('DOMContentLoaded', function() {
     if (!justification) {
       showError('Please enter a justification');
       return;
+    }
+
+    const selectedCheckedBoxes = document.querySelectorAll('.role-checkbox:checked');
+    if (selectedCheckedBoxes.length > 0) {
+      const policyMax = Math.min(...Array.from(selectedCheckedBoxes).map(cb => {
+        const roleItem = cb.closest('.role-item');
+        return parseFloat(roleItem?.dataset.maxDuration || DEFAULT_MAX_ACTIVATION_HOURS);
+      }));
+
+      if (duration > policyMax) {
+        const label = policyMax % 1 === 0 ? String(policyMax) : policyMax.toFixed(1);
+        duration = policyMax;
+        durationSlider.max = policyMax;
+        durationSlider.value = policyMax;
+        durationValue.textContent = label;
+        showError(`Selected duration exceeds policy limit. Maximum allowed for the current selection is ${label}h.`);
+        return;
+      }
     }
 
     if (duration <= 0) {
@@ -725,7 +818,7 @@ document.addEventListener('DOMContentLoaded', function() {
       roleElement.dataset.directoryScopeId = role.directoryScopeId || '/';
       roleElement.dataset.roleType = 'directory';
       roleElement.dataset.assignmentType = role.assignmentType || 'direct';
-      roleElement.dataset.maxDuration = role.maxActivationDuration || 8;
+      roleElement.dataset.maxDuration = role.maxActivationDuration || DEFAULT_MAX_ACTIVATION_HOURS;
 
       const roleName = role.roleName || role.roleDefinitionDisplayName || role.roleDefinition?.displayName || 'Unknown Role';
       const roleId = role.roleDefinitionId ? `role-${role.roleDefinitionId.replace(/[-]/g, '')}` : `role-${Math.random().toString(36).substr(2, 9)}`;
@@ -745,6 +838,7 @@ document.addEventListener('DOMContentLoaded', function() {
         browser.storage.local.get([`${roleId}-checked`], function(result) {
           if (result[`${roleId}-checked`]) {
             checkbox.checked = true;
+            updateSliderMax();
           }
         });
 
@@ -795,8 +889,8 @@ document.addEventListener('DOMContentLoaded', function() {
         actionsDiv.appendChild(timerSpan);
 
         const deactivateBtn = document.createElement('button');
-        deactivateBtn.className = 'deactivate-btn-small';
-        deactivateBtn.textContent = '✕';
+        deactivateBtn.className = 'deactivate-btn';
+        deactivateBtn.textContent = 'Deactivate';
         deactivateBtn.title = 'Deactivate';
         deactivateBtn.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -814,8 +908,8 @@ document.addEventListener('DOMContentLoaded', function() {
         actionsDiv.className = 'inline-role-actions';
 
         const deactivateBtn = document.createElement('button');
-        deactivateBtn.className = 'deactivate-btn-small';
-        deactivateBtn.textContent = '✕';
+        deactivateBtn.className = 'deactivate-btn';
+        deactivateBtn.textContent = 'Deactivate';
         deactivateBtn.title = 'Deactivate';
         deactivateBtn.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -844,7 +938,7 @@ document.addEventListener('DOMContentLoaded', function() {
       roleElement.dataset.roleDefinitionId = role.roleDefinitionId || '';
       roleElement.dataset.roleType = 'group';
       roleElement.dataset.assignmentType = 'group';
-      roleElement.dataset.maxDuration = role.maxActivationDuration || 8;
+      roleElement.dataset.maxDuration = role.maxActivationDuration || DEFAULT_MAX_ACTIVATION_HOURS;
 
       const groupName = role.groupName || 'Unknown Group';
       const accessType = role.accessId === 'owner' ? 'Owner' : 'Member';
@@ -865,6 +959,7 @@ document.addEventListener('DOMContentLoaded', function() {
         browser.storage.local.get([`${groupId}-checked`], function(result) {
           if (result[`${groupId}-checked`]) {
             checkbox.checked = true;
+            updateSliderMax();
           }
         });
 
@@ -910,8 +1005,8 @@ document.addEventListener('DOMContentLoaded', function() {
         actionsDiv.appendChild(timerSpan);
 
         const deactivateBtn = document.createElement('button');
-        deactivateBtn.className = 'deactivate-btn-small';
-        deactivateBtn.textContent = '✕';
+        deactivateBtn.className = 'deactivate-btn';
+        deactivateBtn.textContent = 'Deactivate';
         deactivateBtn.title = 'Deactivate';
         deactivateBtn.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -926,8 +1021,8 @@ document.addEventListener('DOMContentLoaded', function() {
         actionsDiv.className = 'inline-role-actions';
 
         const deactivateBtn = document.createElement('button');
-        deactivateBtn.className = 'deactivate-btn-small';
-        deactivateBtn.textContent = '✕';
+        deactivateBtn.className = 'deactivate-btn';
+        deactivateBtn.textContent = 'Deactivate';
         deactivateBtn.title = 'Deactivate';
         deactivateBtn.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -960,7 +1055,7 @@ document.addEventListener('DOMContentLoaded', function() {
       roleElement.dataset.subscriptionId = role.subscriptionId || '';
       roleElement.dataset.roleType = 'azureResource';
       roleElement.dataset.assignmentType = role.assignmentType || 'direct';
-      roleElement.dataset.maxDuration = role.maxActivationDuration || 8;
+      roleElement.dataset.maxDuration = role.maxActivationDuration || DEFAULT_MAX_ACTIVATION_HOURS;
 
       const roleName = role.properties?.expandedProperties?.roleDefinition?.displayName || role.roleName || 'Unknown Role';
       const subscriptionName = role.subscriptionName || 'Unknown Subscription';
@@ -983,6 +1078,7 @@ document.addEventListener('DOMContentLoaded', function() {
         browser.storage.local.get([`${roleId}-checked`], function(result) {
           if (result[`${roleId}-checked`]) {
             checkbox.checked = true;
+            updateSliderMax();
           }
         });
 
@@ -1037,8 +1133,8 @@ document.addEventListener('DOMContentLoaded', function() {
         actionsDiv.appendChild(timerSpan);
 
         const deactivateBtn = document.createElement('button');
-        deactivateBtn.className = 'deactivate-btn-small';
-        deactivateBtn.textContent = '✕';
+        deactivateBtn.className = 'deactivate-btn';
+        deactivateBtn.textContent = 'Deactivate';
         deactivateBtn.title = 'Deactivate';
         deactivateBtn.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -1053,8 +1149,8 @@ document.addEventListener('DOMContentLoaded', function() {
         actionsDiv.className = 'inline-role-actions';
 
         const deactivateBtn = document.createElement('button');
-        deactivateBtn.className = 'deactivate-btn-small';
-        deactivateBtn.textContent = '✕';
+        deactivateBtn.className = 'deactivate-btn';
+        deactivateBtn.textContent = 'Deactivate';
         deactivateBtn.title = 'Deactivate';
         deactivateBtn.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -1238,6 +1334,9 @@ document.addEventListener('DOMContentLoaded', function() {
     let visibleCount = 0;
     let totalCount = allRoleItems.length;
 
+    const typeFilterIsAll = selectedTypeFilters.has('all');
+    const statusFilterIsAll = selectedStatusFilters.has('all');
+
     allRoleItems.forEach(roleItem => {
       const roleType = roleItem.dataset.roleType;
       const roleStatus = roleItem.dataset.status;
@@ -1249,24 +1348,16 @@ document.addEventListener('DOMContentLoaded', function() {
 
       // Check filter type
       const assignmentType = roleItem.dataset.assignmentType;
-      let matchesFilter = true;
-      if (currentFilter === 'directory') {
-        // "Direct" shows only directory roles assigned directly (not via a group)
-        matchesFilter = roleType === 'directory' && assignmentType === 'direct';
-      } else if (currentFilter === 'group') {
-        // "PIM Groups" shows PIM group memberships AND directory roles inherited via a group
-        matchesFilter = roleType === 'group' || (roleType === 'directory' && assignmentType === 'group');
-      } else if (currentFilter === 'azureResource') {
-        matchesFilter = roleType === 'azureResource';
+      let normalizedFilterType = 'directory';
+      if (roleType === 'azureResource') {
+        normalizedFilterType = 'azureResource';
+      } else if (roleType === 'group' || (roleType === 'directory' && assignmentType === 'group')) {
+        normalizedFilterType = 'group';
       }
+      const matchesFilter = typeFilterIsAll || selectedTypeFilters.has(normalizedFilterType);
 
       // Check status filter
-      let matchesStatus = true;
-      if (currentStatusFilter === 'eligible') {
-        matchesStatus = roleStatus === 'eligible';
-      } else if (currentStatusFilter === 'active') {
-        matchesStatus = roleStatus === 'active';
-      }
+      const matchesStatus = statusFilterIsAll || selectedStatusFilters.has(roleStatus);
 
       // Check search term
       let matchesSearch = true;
@@ -1292,7 +1383,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // Update search results count display
   function updateSearchResultsCount(visible, total) {
-    if (currentSearchTerm || currentFilter !== 'all' || currentStatusFilter !== 'all') {
+    const hasTypeFilter = !selectedTypeFilters.has('all');
+    const hasStatusFilter = !selectedStatusFilters.has('all');
+    if (currentSearchTerm || hasTypeFilter || hasStatusFilter) {
       searchResultsCount.textContent = `Showing ${visible} of ${total} roles`;
       searchResultsCount.classList.remove('hidden');
     } else {
@@ -1309,7 +1402,9 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // Add no-results message if needed
-    if (visibleCount === 0 && (currentSearchTerm || currentFilter !== 'all' || currentStatusFilter !== 'all')) {
+    const hasTypeFilter = !selectedTypeFilters.has('all');
+    const hasStatusFilter = !selectedStatusFilters.has('all');
+    if (visibleCount === 0 && (currentSearchTerm || hasTypeFilter || hasStatusFilter)) {
       const noResultsDiv = document.createElement('div');
       noResultsDiv.className = 'no-results-message';
       noResultsDiv.innerHTML = `

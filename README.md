@@ -20,14 +20,16 @@ It works by catching bearer tokens from requests to Microsoft Graph or Azure Man
 ## Features
 
 - Activate multiple PIM roles simultaneously (Entra ID, Azure resources, and PIM Groups)
-- Customizable activation duration
+- Policy-aware activation duration slider across selected roles
 - Reusing authentication when already signed (automatic token capture)
 - Inline activation status with spinner and success/error messages
-- Search and filter roles by type (Direct, PIM Groups, Azure Resource) and status
+- Search roles by name or scope
+- Adjacent multi-select dropdown filters for type (Direct, PIM Groups, Azure Resource) and status (Eligible, Active)
 - Unified flat role list with type badges (Direct, Group, Resource) and status badges (Eligible, Active)
 - Active roles monitoring with countdown timers and a time-remaining progress bar
+- One-click deactivation from active role cards
 - Support for PIM-enabled groups
-- Dark mode with toggle button (follows OS preference, persisted per browser)
+- Dark mode that follows browser/OS preference
 - Firefox Multi-Account Containers support — each container maintains its own independent token and role cache, enabling side-by-side multi-account and multi-tenant workflows
 
 ## Installation
@@ -53,11 +55,12 @@ The extension is available in the [Firefox Add-Ons Extensions store](https://add
 4. The extension will display your eligible PIM roles (both Entra ID and Azure resource roles)
 5. Use the search box or filters to find specific roles
 6. Select the roles you want to activate using the checkboxes
-7. Set the activation duration using the slider (default: 8 hours)
+7. Set the activation duration using the slider (initial value is up to 8 hours, but automatically capped by policy for the current selection)
 8. Enter a justification for the activation
 9. (Optional) Add ticket system information
-10. Click "Activate Selected Roles"
+10. Click "Activate"
 11. Switch to the "Active Roles" tab to monitor your activated roles with countdown timers
+12. Use "Deactivate" on active roles when needed
 
 ## Limitations
 
@@ -81,7 +84,7 @@ PIMfox for Entra operates entirely within your browser and relies on the authent
 
 2. **Role discovery** — When you open the popup, the extension uses the captured tokens to call the Microsoft Graph and Azure Management REST APIs directly from your browser. It fetches your eligible Entra ID role assignments, PIM-enabled group memberships, and Azure resource role assignments across all subscriptions.
 
-3. **Activation** — When you click **Activate Selected Roles**, the extension submits `roleAssignmentScheduleRequests` directly to the appropriate API endpoint for each role type:
+3. **Activation** — When you click **Activate**, the extension submits `roleAssignmentScheduleRequests` directly to the appropriate API endpoint for each role type:
    - **Entra ID roles** → Microsoft Graph (`/v1.0/roleManagement/directory/roleAssignmentScheduleRequests`)
    - **Azure resource roles** → Azure Management API (`/providers/Microsoft.Authorization/roleAssignmentScheduleRequests`)
    - **PIM Groups** → Microsoft Graph (`/v1.0/identityGovernance/privilegedAccess/group/assignmentScheduleRequests`)
@@ -103,7 +106,7 @@ Firefox requires extensions to declare every host they need to access. Below is 
 | `https://*.microsoft.com/*` | Covers additional Microsoft subdomains (e.g. `login.microsoft.com`) that the portal may route requests through, ensuring no token-bearing requests are missed. |
 | `https://*.microsoftonline.com/*` | Covers the Azure AD / Entra authentication domain (`login.microsoftonline.com`) where OAuth tokens are issued; required to intercept auth-bearing requests at sign-in time. |
 | `https://*.windows.net/*` | Covers legacy Azure endpoints (e.g. `management.core.windows.net`) still used by some Azure portal flows when refreshing tokens or fetching subscription data. |
-| `storage` | Store encrypted tokens and user preferences (activation duration, dark mode setting, role cache) in the browser's local storage. |
+| `storage` | Store encrypted tokens and user preferences (activation duration, role cache) in the browser's local storage. |
 | `tabs` | Read tab metadata (including `cookieStoreId`, URL, and title) for all open tabs. PIMfox only uses the `cookieStoreId` property to scope tokens and role caches per Firefox Multi-Account Container — tab URLs and titles are never read or stored. Firefox requires this broader `tabs` permission to access `cookieStoreId`; there is no narrower alternative. |
 | `webRequest` / `webRequestBlocking` | Inspect outgoing HTTP request headers to extract bearer tokens as they are sent to Microsoft APIs — this is the core mechanism that avoids requiring you to paste tokens manually. |
 | `activeTab` | Read the URL of the currently active tab to determine whether you are on an Azure portal page. |
@@ -152,7 +155,7 @@ Several things can cause roles to be absent or partially visible:
 - **No token captured yet** — you have not visited the relevant portal since installing the extension or since the last token was cleared. Visit the Entra portal (for Entra ID roles and PIM Groups) and/or the Azure portal (for Azure resource roles) to trigger capture. PIMfox will detect the token automatically and load your roles — no manual refresh required. While waiting, the status bar shows *"Waiting for portal activity…"*.
 - **Token expired** — tokens are valid for roughly 60–90 minutes. If the popup shows an expiry warning, hard-reload the portal page (`Ctrl+Shift+R`) and re-open PIMfox.
 - **Insufficient token scope** — the token was captured from a page that did not request PIM permissions. Navigate specifically to the PIM section of the Entra portal, then refresh PIMfox.
-- **Active filter or search** — the type filter chips (Direct, PIM Groups, Azure Resource) or status filter (Eligible, Active) may be narrowing the list. Check that "All" is selected, and clear any search text.
+- **Active filter or search** — the type/status dropdown filters or search term may be narrowing the list. Check that "All" is selected, and clear any search text.
 - **No eligible roles assigned** — your account may genuinely have no PIM-eligible assignments. Confirm in the Entra portal under PIM → My roles.
 - **Azure resource roles missing** — these require a separate Azure Management token, obtained by visiting the Azure portal. If you have only visited the Entra portal, Azure resource roles will not appear.
 - **Role activation is still propagating** — after activating a role, it can take a few seconds to a minute for the API to reflect the active state. Use the refresh button if a recently activated role is not yet showing as active.

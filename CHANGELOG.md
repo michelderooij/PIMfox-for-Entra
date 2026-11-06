@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.2
+- Improved: Role type and status filtering now use adjacent multi-select dropdowns with clear selected-state labels in the button text.
+- Improved: Activation duration now honors policy-derived limits from Entra, PIM Groups, and Azure resource roles more reliably; the slider initializes to `min(8h, resolved maximum)` for the current selection.
+- Improved: Active role cards now include a dedicated **Deactivate** action button for faster deactivation.
+- Improved: Popup footer now displays the extension version dynamically from `manifest.json`.
+- Changed: Duration adjustment helper text below the slider was removed for a cleaner activation panel.
+- Changed: Role Activation panel spacing was tightened to remove extra blank space above the section heading.
+- Changed: Startup logging now uses the manifest version dynamically and includes the build timestamp.
+
 ## 1.4.1
 - Fixed: A spurious "Could not fetch active PIM Group memberships — please visit Microsoft Entra portal and sign in" notice could appear alongside visible eligible group roles. The notice was shown whenever the `assignmentScheduleInstances` API returned HTTP 403, but the same code path was also used for a missing token, conflating two unrelated situations. The extension now distinguishes between no token stored (the sign-in prompt is appropriate) and an API-level 403 (treated as no active assignments, since the Entra portal only requests the `PrivilegedAssignmentSchedule.Read.AzureADGroup` scope when active group assignments exist — background-poll tokens reliably lack it).
 - Improved: When no valid token is present, the extension now automatically detects the moment the portal makes an API call and transitions to the roles view without requiring a manual refresh. While waiting, the status bar shows "Waiting for portal activity…". If no token is captured within two minutes the static "No valid token" state is shown as before.

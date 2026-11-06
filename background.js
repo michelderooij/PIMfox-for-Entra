@@ -1,4 +1,6 @@
-console.log('PIMfox for Entra loaded');
+const BUILD_TIMESTAMP = '2026-11-06 15:05:28';
+const BUILD_VERSION = browser.runtime.getManifest()?.version || 'unknown';
+console.log(`PIMfox for Entra loaded - version ${BUILD_VERSION}, built ${BUILD_TIMESTAMP}`);
 
 // Storage key helper — scopes keys to a Firefox container (cookieStoreId).
 // The default container uses the original unsuffixed key names for backward compatibility.
@@ -1114,35 +1116,160 @@ async function getAzureResourceRoles(cid = 'firefox-default') {
   }
 }
 
+const DEFAULT_MAX_ACTIVATION_HOURS = 24;
+
 // Helper: parse ISO 8601 duration to hours (e.g. "PT8H" → 8, "P1D" → 24, "PT30M" → 0.5)
 function parseIso8601Duration(duration) {
-  if (!duration) return 8;
+  if (!duration) return DEFAULT_MAX_ACTIVATION_HOURS;
   const match = duration.match(/P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?/);
-  if (!match) return 8;
+  if (!match) return DEFAULT_MAX_ACTIVATION_HOURS;
   const days = parseInt(match[1] || 0);
   const hours = parseInt(match[2] || 0);
   const minutes = parseInt(match[3] || 0);
   return days * 24 + hours + minutes / 60;
 }
 
+function normalizeRoleDefinitionId(roleDefinitionId) {
+  if (!roleDefinitionId) return '';
+  return String(roleDefinitionId).split('/').pop().toLowerCase();
+}
+
+function escapeODataString(value) {
+  return String(value || '').replace(/'/g, "''");
+}
+
+function mergePolicyDuration(policyMap, key, maxHours) {
+  if (!key || maxHours === null || maxHours === undefined) return;
+  if (!policyMap.has(key)) {
+    policyMap.set(key, maxHours);
+    return;
+  }
+  // Use strictest cap when multiple assignments/rules exist.
+  policyMap.set(key, Math.min(policyMap.get(key), maxHours));
+}
+
+async function fetchPagedValues(url, headers) {
+  const allValues = [];
+  let nextUrl = url;
+  // Safety cap to avoid infinite loops on malformed next links.
+  let pageCount = 0;
+
+  while (nextUrl && pageCount < 50) {
+    const response = await fetch(nextUrl, { headers });
+    if (!response.ok) {
+      return { ok: false, value: allValues };
+    }
+
+    const data = await response.json();
+    if (Array.isArray(data.value)) {
+      allValues.push(...data.value);
+    }
+
+    nextUrl = data['@odata.nextLink'] || data.nextLink || null;
+    pageCount += 1;
+  }
+
+  return { ok: true, value: allValues };
+}
+
+async function resolveGraphAssignmentMaxDuration(assignment, graphToken, policyDurationCache) {
+  const directRulesMax = getMaxDurationFromRules(assignment?.policy?.rules);
+  if (directRulesMax !== null) return directRulesMax;
+
+  const policyIdRaw = assignment?.policyId || assignment?.policy?.id;
+  if (!policyIdRaw) return null;
+
+  const policyCacheKey = String(policyIdRaw).toLowerCase();
+  if (policyDurationCache.has(policyCacheKey)) {
+    return policyDurationCache.get(policyCacheKey);
+  }
+
+  const policyId = String(policyIdRaw).split('/').pop();
+  if (!policyId) {
+    policyDurationCache.set(policyCacheKey, null);
+    return null;
+  }
+
+  try {
+    const response = await fetch(
+      `https://graph.microsoft.com/v1.0/policies/roleManagementPolicies/${encodeURIComponent(policyId)}?$expand=rules`,
+      { headers: { 'Authorization': `Bearer ${graphToken}`, 'Content-Type': 'application/json' } }
+    );
+
+    if (!response.ok) {
+      policyDurationCache.set(policyCacheKey, null);
+      return null;
+    }
+
+    const policyData = await response.json();
+    const maxHours = getMaxDurationFromRules(policyData.rules || []);
+    policyDurationCache.set(policyCacheKey, maxHours);
+    return maxHours;
+  } catch (error) {
+    console.warn('Failed to resolve policy rules by policyId:', policyIdRaw, error);
+    policyDurationCache.set(policyCacheKey, null);
+    return null;
+  }
+}
+
 // Helper: extract max activation hours from a policy rules array
 // Handles both Graph API (@odata.type) and ARM API (ruleType) rule formats
 function getMaxDurationFromRules(rules) {
   if (!rules || !Array.isArray(rules)) return null;
-  const expirationRule = rules.find(r =>
+
+  const expirationRules = rules.filter(r =>
     r['@odata.type'] === '#microsoft.graph.unifiedRoleManagementPolicyExpirationRule' ||
     r.ruleType === 'RoleManagementPolicyExpirationRule'
   );
-  if (!expirationRule) return null;
-  if (!expirationRule.isExpirationRequired) return null;
-  const dur = expirationRule.maximumDuration;
-  if (!dur) return null;
-  return parseIso8601Duration(dur);
+  if (expirationRules.length === 0) return null;
+
+  // The maximum duration is expressed as ISO8601 in maximumDuration (e.g. PT8H).
+  // Prefer rules that require expiration, but still honor explicit maximumDuration if present.
+  const durationRules = expirationRules.filter(rule => !!rule.maximumDuration);
+  if (durationRules.length === 0) return null;
+
+  const getTarget = (rule) => rule.target || {};
+  const isEndUserOrAll = (rule) => {
+    const caller = String(getTarget(rule).caller || '').toLowerCase();
+    return !caller || caller === 'enduser' || caller === 'all';
+  };
+  const isAssignmentOrAll = (rule) => {
+    const level = String(getTarget(rule).level || '').toLowerCase();
+    return !level || level === 'assignment' || level === 'all';
+  };
+  const hasActivateOrAllOperation = (rule) => {
+    const operations = Array.isArray(getTarget(rule).operations)
+      ? getTarget(rule).operations.map(op => String(op).toLowerCase())
+      : [];
+    return operations.length === 0 || operations.some(op => op.includes('activate') || op === 'all');
+  };
+
+  const activationCandidates = durationRules.filter(rule =>
+    isEndUserOrAll(rule) &&
+    isAssignmentOrAll(rule) &&
+    hasActivateOrAllOperation(rule)
+  );
+
+  const requiredDurationRules = durationRules.filter(rule => rule.isExpirationRequired);
+  const preferredPool = requiredDurationRules.length > 0 ? requiredDurationRules : durationRules;
+  const preferredActivationCandidates = preferredPool.filter(rule =>
+    isEndUserOrAll(rule) &&
+    isAssignmentOrAll(rule) &&
+    hasActivateOrAllOperation(rule)
+  );
+
+  const candidates = preferredActivationCandidates.length > 0
+    ? preferredActivationCandidates
+    : (activationCandidates.length > 0 ? activationCandidates : preferredPool);
+  // Use strictest rule to avoid requesting more than policy allows.
+  const maxHours = Math.min(...candidates.map(rule => parseIso8601Duration(rule.maximumDuration)));
+  return Number.isFinite(maxHours) ? maxHours : null;
 }
 
 // Fetch Entra directory role activation duration limits via policy API
 // Returns Map<roleDefinitionId, maxHours>
-async function getEntraRolePolicies(cid = 'firefox-default') {
+async function getEntraRolePolicies(roleDefinitionIds, cid = 'firefox-default') {
+  if (!roleDefinitionIds || roleDefinitionIds.length === 0) return new Map();
   try {
     const _gk = sk('graphToken', cid);
     const { [_gk]: encryptedToken } = await browser.storage.local.get([_gk]);
@@ -1150,21 +1277,24 @@ async function getEntraRolePolicies(cid = 'firefox-default') {
     const graphToken = await decryptToken(encryptedToken);
     if (!graphToken) return new Map();
 
+    const requestedRoleDefs = new Set(roleDefinitionIds.map(normalizeRoleDefinitionId).filter(Boolean));
     const filter = encodeURIComponent(`scopeId eq '/' and scopeType eq 'Directory'`);
-    const response = await fetch(
+    const response = await fetchPagedValues(
       `https://graph.microsoft.com/v1.0/policies/roleManagementPolicyAssignments?$filter=${filter}&$expand=policy($expand=rules)`,
-      { headers: { 'Authorization': `Bearer ${graphToken}`, 'Content-Type': 'application/json' } }
+      { 'Authorization': `Bearer ${graphToken}`, 'Content-Type': 'application/json' }
     );
     if (!response.ok) return new Map();
 
-    const data = await response.json();
+    const assignments = response.value || [];
     const policyMap = new Map();
-    (data.value || []).forEach(assignment => {
-      const roleDefId = assignment.roleDefinitionId;
-      const rules = assignment.policy?.rules;
-      const maxHours = getMaxDurationFromRules(rules);
-      if (roleDefId && maxHours !== null) policyMap.set(roleDefId, maxHours);
-    });
+    const policyDurationCache = new Map();
+    await Promise.all(assignments.map(async assignment => {
+      const roleDefId = normalizeRoleDefinitionId(assignment.roleDefinitionId);
+      if (!requestedRoleDefs.has(roleDefId)) return;
+      const maxHours = await resolveGraphAssignmentMaxDuration(assignment, graphToken, policyDurationCache);
+      mergePolicyDuration(policyMap, roleDefId, maxHours);
+    }));
+
     return policyMap;
   } catch (error) {
     console.warn('Failed to fetch Entra role policies:', error);
@@ -1173,9 +1303,9 @@ async function getEntraRolePolicies(cid = 'firefox-default') {
 }
 
 // Fetch group PIM role activation duration limits via policy API
-// Returns Map<groupId, maxHours>
-async function getGroupRolePolicies(groupIds, cid = 'firefox-default') {
-  if (!groupIds || groupIds.length === 0) return new Map();
+// Returns Map<`${groupId}@${roleDefinitionId}`, maxHours>
+async function getGroupRolePolicies(groupEntries, cid = 'firefox-default') {
+  if (!groupEntries || groupEntries.length === 0) return new Map();
   try {
     const _gk = sk('graphToken', cid);
     const { [_gk]: encryptedToken } = await browser.storage.local.get([_gk]);
@@ -1183,21 +1313,28 @@ async function getGroupRolePolicies(groupIds, cid = 'firefox-default') {
     const graphToken = await decryptToken(encryptedToken);
     if (!graphToken) return new Map();
 
+    const requestedKeys = new Set(groupEntries.map(e => `${e.groupId}@${normalizeRoleDefinitionId(e.roleDefinitionId)}`));
+    const policyDurationCache = new Map();
     const policyMap = new Map();
-    await Promise.all(groupIds.map(async groupId => {
+    await Promise.all(groupEntries.map(async entry => {
+      const groupId = entry.groupId;
+      const roleDefId = normalizeRoleDefinitionId(entry.roleDefinitionId);
+      if (!groupId || !roleDefId) return;
+
       try {
-        const filter = encodeURIComponent(`scopeId eq '${groupId}' and scopeType eq 'Group'`);
-        const response = await fetch(
+        const filter = encodeURIComponent(`scopeId eq '${escapeODataString(groupId)}' and scopeType eq 'Group'`);
+        const response = await fetchPagedValues(
           `https://graph.microsoft.com/v1.0/policies/roleManagementPolicyAssignments?$filter=${filter}&$expand=policy($expand=rules)`,
-          { headers: { 'Authorization': `Bearer ${graphToken}`, 'Content-Type': 'application/json' } }
+          { 'Authorization': `Bearer ${graphToken}`, 'Content-Type': 'application/json' }
         );
         if (response.ok) {
-          const data = await response.json();
-          if (data.value && data.value.length > 0) {
-            const rules = data.value[0]?.policy?.rules;
-            const maxHours = getMaxDurationFromRules(rules);
-            if (maxHours !== null) policyMap.set(groupId, maxHours);
-          }
+          await Promise.all((response.value || []).map(async assignment => {
+            const assignmentRoleDefId = normalizeRoleDefinitionId(assignment.roleDefinitionId);
+            const key = `${groupId}@${assignmentRoleDefId}`;
+            if (!requestedKeys.has(key)) return;
+            const maxHours = await resolveGraphAssignmentMaxDuration(assignment, graphToken, policyDurationCache);
+            mergePolicyDuration(policyMap, key, maxHours);
+          }));
         }
       } catch (e) {
         console.warn(`Failed to fetch policy for group ${groupId}:`, e);
@@ -1226,36 +1363,31 @@ async function getAzureResourceRolePolicies(subscriptionIds, cid = 'firefox-defa
       try {
         // Fetch policies and assignments for this subscription in parallel
         const [policiesResp, assignmentsResp] = await Promise.all([
-          fetch(
+          fetchPagedValues(
             `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.Authorization/roleManagementPolicies?api-version=2020-10-01-preview`,
-            { headers: { 'Authorization': `Bearer ${azureToken}`, 'Content-Type': 'application/json' } }
+            { 'Authorization': `Bearer ${azureToken}`, 'Content-Type': 'application/json' }
           ),
-          fetch(
+          fetchPagedValues(
             `https://management.azure.com/subscriptions/${subId}/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01-preview`,
-            { headers: { 'Authorization': `Bearer ${azureToken}`, 'Content-Type': 'application/json' } }
+            { 'Authorization': `Bearer ${azureToken}`, 'Content-Type': 'application/json' }
           )
         ]);
         if (!policiesResp.ok || !assignmentsResp.ok) return;
 
-        const [policiesData, assignmentsData] = await Promise.all([
-          policiesResp.json(),
-          assignmentsResp.json()
-        ]);
-
         // Build map of policyId → maxHours from the policy rules
         const policyRulesMap = new Map();
-        (policiesData.value || []).forEach(policy => {
+        (policiesResp.value || []).forEach(policy => {
           const rules = policy.properties?.rules;
           const maxHours = getMaxDurationFromRules(rules);
           if (maxHours !== null) policyRulesMap.set(policy.name, maxHours);
         });
 
         // Join assignments to get roleDefinitionId → maxHours
-        (assignmentsData.value || []).forEach(assignment => {
-          const roleDefId = assignment.properties?.roleDefinitionId?.split('/').pop();
+        (assignmentsResp.value || []).forEach(assignment => {
+          const roleDefId = normalizeRoleDefinitionId(assignment.properties?.roleDefinitionId);
           const policyName = assignment.properties?.policyId?.split('/').pop();
           if (roleDefId && policyName && policyRulesMap.has(policyName)) {
-            policyMap.set(`${roleDefId}@${subId}`, policyRulesMap.get(policyName));
+            policyMap.set(`${roleDefId}@${String(subId).toLowerCase()}`, policyRulesMap.get(policyName));
           }
         });
       } catch (e) {
@@ -1350,43 +1482,56 @@ async function getAllRoles(cid = 'firefox-default') {
     // Fetch role management policies in parallel and merge maxActivationDuration
     try {
       // Collect unique IDs for policy lookups
-      const uniqueGroupIds = [...new Set(
-        (results.groupEligibilities.value || []).map(r => r.groupId).filter(Boolean)
+      const uniqueRoleDefinitionIds = [...new Set(
+        (results.directoryRoles.value || []).map(r => normalizeRoleDefinitionId(r.roleDefinitionId)).filter(Boolean)
       )];
+      const uniqueGroupEntries = [
+        ...new Map(
+          (results.groupEligibilities.value || [])
+            .filter(r => r.groupId && r.roleDefinitionId)
+            .map(r => {
+              const roleDefId = normalizeRoleDefinitionId(r.roleDefinitionId);
+              return [`${r.groupId}@${roleDefId}`, { groupId: r.groupId, roleDefinitionId: roleDefId }];
+            })
+        ).values()
+      ];
       const uniqueSubscriptionIds = [...new Set(
         (results.azureResourceRoles.value || []).map(r => r.subscriptionId).filter(Boolean)
       )];
 
       const [entraPolMap, groupPolMap, azurePolMap] = await Promise.all([
-        getEntraRolePolicies(cid),
-        getGroupRolePolicies(uniqueGroupIds, cid),
+        getEntraRolePolicies(uniqueRoleDefinitionIds, cid),
+        getGroupRolePolicies(uniqueGroupEntries, cid),
         getAzureResourceRolePolicies(uniqueSubscriptionIds, cid)
       ]);
 
       // Merge maxActivationDuration into each directory role
       (results.directoryRoles.value || []).forEach(role => {
-        const hours = entraPolMap.get(role.roleDefinitionId);
-        role.maxActivationDuration = (hours !== undefined) ? hours : 8;
+        const roleDefId = normalizeRoleDefinitionId(role.roleDefinitionId);
+        const hours = entraPolMap.get(roleDefId);
+        role.maxActivationDuration = (hours !== undefined) ? hours : DEFAULT_MAX_ACTIVATION_HOURS;
       });
 
       // Merge maxActivationDuration into each group eligibility
       (results.groupEligibilities.value || []).forEach(role => {
-        const hours = groupPolMap.get(role.groupId);
-        role.maxActivationDuration = (hours !== undefined) ? hours : 8;
+        const key = `${role.groupId}@${normalizeRoleDefinitionId(role.roleDefinitionId)}`;
+        const hours = groupPolMap.get(key);
+        role.maxActivationDuration = (hours !== undefined) ? hours : DEFAULT_MAX_ACTIVATION_HOURS;
       });
 
       // Merge maxActivationDuration into each Azure resource role
       (results.azureResourceRoles.value || []).forEach(role => {
-        const key = `${role.roleDefinitionId}@${role.subscriptionId}`;
+        const roleDefId = normalizeRoleDefinitionId(role.properties?.roleDefinitionId || role.roleDefinitionId);
+        const key = `${roleDefId}@${String(role.subscriptionId || '').toLowerCase()}`;
         const hours = azurePolMap.get(key);
-        role.maxActivationDuration = (hours !== undefined) ? hours : 8;
+        role.maxActivationDuration = (hours !== undefined) ? hours : DEFAULT_MAX_ACTIVATION_HOURS;
       });
     } catch (policyError) {
-      console.warn('Policy fetch failed, defaulting maxActivationDuration to 8h:', policyError);
+      console.warn(`Policy fetch failed, defaulting maxActivationDuration to ${DEFAULT_MAX_ACTIVATION_HOURS}h:`, policyError);
       // Set default fallback for all roles
-      (results.directoryRoles.value || []).forEach(r => { if (!r.maxActivationDuration) r.maxActivationDuration = 8; });
-      (results.groupEligibilities.value || []).forEach(r => { if (!r.maxActivationDuration) r.maxActivationDuration = 8; });
-      (results.azureResourceRoles.value || []).forEach(r => { if (!r.maxActivationDuration) r.maxActivationDuration = 8; });
+      (results.directoryRoles.value || []).forEach(r => { if (!r.maxActivationDuration) r.maxActivationDuration = DEFAULT_MAX_ACTIVATION_HOURS; });
+      (results.groupEligibilities.value || []).forEach(r => { if (!r.maxActivationDuration) r.maxActivationDuration = DEFAULT_MAX_ACTIVATION_HOURS; });
+      (results.azureResourceRoles.value || []).forEach(r => { if (!r.maxActivationDuration) r.maxActivationDuration = DEFAULT_MAX_ACTIVATION_HOURS; });
     }
 
     return results;

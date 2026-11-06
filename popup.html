@@ -1,21 +1,25 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>Entra PIM Role Viewer</title>
+  <title>PIMfox, an PIM role activator extension for Firefox</title>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <div class="container">
-    <h1>PIMfox</h1>
-    <p class="subheading">An Entra PIM activator Firefox extension by <a href="https://eightwone.com/" target="_blank">Michel de Rooij</a></p>
+    <div class="header-row">
+      <div class="header-text">
+        <h1>PIMfox</h1>
+      </div>
+      <div class="header-actions">
+        <button id="refresh-button">Refresh</button>
+        <button id="clear-token-button">Clear</button>
+      </div>
+    </div>
 
     <div id="status-bar">
       <span id="status-message">Loading...</span>
-      <div class="status-bar-buttons">
-        <button id="refresh-button">Refresh</button>
-        <button id="dark-mode-toggle" title="Toggle dark mode">🌙</button>
-      </div>
     </div>
     
     <div id="token-status-container">
@@ -31,7 +35,7 @@
     <div id="no-token-view" class="hidden">
       <p>No access token found. To use this extension:</p>
       <ol>
-        <li>Sign in to a Microsoft service like <a href="https://portal.azure.com" target="_blank">Azure Portal</a> or <a href="https://admin.microsoft.com" target="_blank">Microsoft 365 Admin Center</a></li>
+        <li>Sign in to a Microsoft service like <a href="https://portal.azure.com" target="_blank" rel="noopener noreferrer">Azure Portal</a> or <a href="https://admin.microsoft.com" target="_blank" rel="noopener noreferrer">Microsoft 365 Admin Center</a></li>
         <li>Navigate around in the portal to ensure Microsoft Graph API calls are made</li>
         <li>Return to this extension and click "Refresh"</li>
       </ol>
@@ -46,16 +50,24 @@
           <input type="text" id="role-search" placeholder="🔍 Search roles by name or scope..." class="search-input">
           <button id="clear-search" class="btn-clear-search hidden">✕</button>
         </div>
-        <div class="filter-chips">
-          <button class="filter-chip active" data-filter="all">All</button>
-          <button class="filter-chip" data-filter="directory">👤 Direct</button>
-          <button class="filter-chip" data-filter="group">👥 PIM Groups</button>
-          <button class="filter-chip" data-filter="azureResource">☁️ Azure Resource</button>
-        </div>
-        <div class="filter-chips status-filter">
-          <button class="filter-chip active" data-status-filter="all">All Status</button>
-          <button class="filter-chip" data-status-filter="eligible">Eligible</button>
-          <button class="filter-chip" data-status-filter="active">Active</button>
+        <div class="filter-dropdown-row">
+          <div class="filter-dropdown" id="type-filter-dropdown">
+            <button type="button" class="filter-dropdown-toggle" id="type-filter-toggle" aria-expanded="false">Type: All</button>
+            <div class="filter-dropdown-menu hidden" id="type-filter-menu">
+              <label class="filter-dropdown-option"><input type="checkbox" class="type-filter-option" value="all" checked> All</label>
+              <label class="filter-dropdown-option"><input type="checkbox" class="type-filter-option" value="directory"> 👤 Direct</label>
+              <label class="filter-dropdown-option"><input type="checkbox" class="type-filter-option" value="group"> 👥 PIM Groups</label>
+              <label class="filter-dropdown-option"><input type="checkbox" class="type-filter-option" value="azureResource"> ☁️ Azure Resource</label>
+            </div>
+          </div>
+          <div class="filter-dropdown" id="status-filter-dropdown">
+            <button type="button" class="filter-dropdown-toggle" id="status-filter-toggle" aria-expanded="false">Status: All</button>
+            <div class="filter-dropdown-menu hidden" id="status-filter-menu">
+              <label class="filter-dropdown-option"><input type="checkbox" class="status-filter-option" value="all" checked> All Status</label>
+              <label class="filter-dropdown-option"><input type="checkbox" class="status-filter-option" value="eligible"> Eligible</label>
+              <label class="filter-dropdown-option"><input type="checkbox" class="status-filter-option" value="active"> Active</label>
+            </div>
+          </div>
         </div>
         <div id="search-results-count" class="search-results-count hidden"></div>
       </div>
@@ -67,15 +79,15 @@
         <h3>Role Activation</h3>
         
         <div class="control-group">
-          <label for="duration-slider">Duration (hours): <span id="duration-value">1</span></label>
-          <input type="range" id="duration-slider" min="0" max="8" step="0.5" value="1" class="slider">
+          <label for="duration-slider">Duration (hours): <span id="duration-value">8</span></label>
+          <input type="range" id="duration-slider" min="0" max="24" step="0.5" value="8" class="slider">
         </div>
 
         <div id="duration-adjust-info" class="info-message hidden"></div>
         
         <div class="control-group">
           <label for="justification-text">Justification:</label>
-          <textarea id="justification-text" placeholder="Enter reason for activation" rows="3" class="text-input"></textarea>
+          <input type="text" id="justification-text" placeholder="Enter reason for activation" class="text-input">
         </div>
         
         <div class="ticket-info-container">
@@ -91,7 +103,7 @@
         </div>
         
         <div class="control-group">
-          <button id="activate-button" class="btn-primary">Activate Selected Roles</button>
+          <button id="activate-button" class="btn-primary">Activate</button>
         </div>
         
         <div id="activation-status" class="hidden">
@@ -108,10 +120,11 @@
       <p class="error-message">An error occurred:</p>
       <p id="error-details"></p>
     </div>
-    
-    <div class="footer">
-      <button id="clear-token-button" class="btn-text">Clear Token</button>
+
+    <div class="popup-attribution">
+      PIMfox, an Entra PIM activator Firefox extension | <span id="popup-version">v?</span> | <a href="https://github.com/michelderooij/PIMfox-for-Entra" target="_blank" rel="noopener noreferrer">GitHub</a>.
     </div>
+    
   </div>
   <script src="activation.js"></script>
   <script src="popup.js"></script>
