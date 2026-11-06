@@ -1,4 +1,4 @@
-const BUILD_TIMESTAMP = '2026-11-06 15:05:28';
+const BUILD_TIMESTAMP = '2026-11-06 16:00:40';
 const BUILD_VERSION = browser.runtime.getManifest()?.version || 'unknown';
 console.log(`PIMfox for Entra loaded - version ${BUILD_VERSION}, built ${BUILD_TIMESTAMP}`);
 
